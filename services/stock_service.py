@@ -13,7 +13,7 @@ import logging
 from typing import Dict, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
-from services.search_services import resolve_to_yfinance_ticker
+
 logger = logging.getLogger(__name__)
 
 # ── Well-known Indian tickers that users type without the exchange suffix ──────
@@ -228,20 +228,3 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["BB_Lower"] = df["SMA_20"] - 2 * std20
 
     return df
-
-# Add this import at the top of stock_service.py
-
-
-# Add this new function to stock_service.py (after the existing imports)
-def resolve_company_to_ticker(company_name: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """
-    Convert a user-friendly company name to a yfinance ticker symbol.
-    Uses hybrid search (FMP + Yahoo Finance).
-
-    Args:
-        company_name: e.g., "Reliance Industries", "Google", "Tata Motors"
-
-    Returns:
-        (yf_ticker, market, company_name) or (None, None, None) if not found
-    """
-    return resolve_to_yfinance_ticker(company_name)
