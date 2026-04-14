@@ -35,6 +35,7 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+import html
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -55,7 +56,7 @@ from services.stock_service import (
     fetch_fundamentals,
     fetch_price_history,
 )
-from services.news_service import fetch_news
+from services.news_service import fetch_news, get_api_key_status
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -815,52 +816,42 @@ def render_news_feed(ticker: str, company_name: str,
         title    = a.get("title",    "No title")
         url      = a.get("url",      "#")
         source   = a.get("source",   "Unknown")
-        pub      = a.get("published","")
+        pub      = a.get("published", "")
         summary  = a.get("summary",  "")
-        region   = a.get("region",   "Global")
-        provider = a.get("provider", "")
         epoch    = a.get("pub_epoch")
 
+        safe_title = html.escape(html.unescape(title))
+        safe_summary = html.escape(html.unescape(summary))
+        safe_source = html.escape(source)
+
         age_cls, age_dot = _age_class_and_label(epoch)
-
-        region_html  = region_badge(region)
-        source_html  = source_badge(source)
-        provider_tip = (
-            f'<span style="color:#555;font-size:11px">via {provider}</span>'
-        )
-        age_html = (
-            f'<span class="{age_cls}" style="font-size:11px">'
-            f'{age_dot} {pub}</span>'
-        )
-
-        summary_html = (
-            f'<div class="news-summary">'
-            f'{summary[:280]}{"…" if len(summary) > 280 else ""}'
-            f'</div>'
-            if summary else ""
-        )
 
         st.markdown(f"""
         <div class="news-card">
             <div class="news-title">
-                <a href="{url}" target="_blank" rel="noopener noreferrer">{title}</a>
+                <a href="{url}" target="_blank" rel="noopener noreferrer">{safe_title}</a>
             </div>
             <div class="news-meta">
-                {region_html}{source_html}
-                &nbsp;·&nbsp; {age_html}
-                &nbsp;&nbsp;{provider_tip}
+                <span class="{age_cls}" style="font-size:11px">{age_dot} {pub}</span>
+                &nbsp;·&nbsp;
+                <span style="font-size:11px"><b>{safe_source}</b></span>
             </div>
-            {summary_html}
+            <div class="news-summary" style="margin-top:8px;font-size:13px;color:#b0b5c1;">
+                {safe_summary[:300]}{"…" if len(safe_summary) > 300 else ""}
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
     # ── Footer caption ────────────────────────────────────────────────────────
     st.markdown(
-        f"<div style='color:#8b92a8;font-size:12px;margin-top:8px'>"
-        f"🟢 ≤{NEWS_WARN_AGE_DAYS}d &nbsp;"
-        f"🟡 {NEWS_WARN_AGE_DAYS}–{NEWS_MAX_AGE_DAYS}d &nbsp;"
-        f"· Only articles from the last {NEWS_MAX_AGE_DAYS} days are shown. "
-        f"Cache refreshes every 5 min."
+        f"<div style='color:#8b92a8;font-size:11px;margin-top:12px;'>"
+        f"<b>Article age indicators:</b><br/>"
+        f"🟢 Fresh (≤14 days old) &nbsp; | &nbsp; "
+        f"🟡 Aging (15-29 days old) &nbsp; | &nbsp; "
+        f"🔴 Old (30 days old)<br/>"
+        f"<br/>"
+        f"Only showing articles from the last {NEWS_MAX_AGE_DAYS} days (most recent first). "
+        f"Cache refreshes every 5 minutes."
         f"</div>",
         unsafe_allow_html=True,
     )

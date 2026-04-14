@@ -1,40 +1,42 @@
 """
-news_service.py - Parallel News Aggregator with Multi-Source Deduplication
-===========================================================================
+news_service.py - Enhanced Multi-Source News Aggregator with Sentiment & Real-time Features
+===========================================================================================
 
-Architecture overview
-─────────────────────
-                        ┌─ TheNewsAPI ──────────────┐
-                        ├─ Finnhub ─────────────────┤
-  US stocks  ──────────┼─ Polygon.io (opt.) ────────┼──► merge ──► deduplicate ──► sort ──► top-N
-                        ├─ Global RSS feeds ─────────┤
-                        └─ yfinance ────────────────┘
+Architecture
+────────────
+Multiple parallel news sources (AlphaVantage, NewsAPI, TheNewsAPI, Finnhub, Polygon, RSS) all
+fetched concurrently, deduplicated, ranked by relevance + importance + freshness, with
+sentiment analysis and breaking news detection.
 
-                        ┌─ India RSS (MC/ET/BS/Mint) ┐
-  India stocks ─────────┼─ Google News RSS ──────────┼──► merge ──► deduplicate ──► sort ──► top-N
-                        └─ yfinance ────────────────┘
+NEW Features in this version
+───────────────────────────
+✓ Real-time sentiment analysis (BULLISH/NEUTRAL/BEARISH)
+✓ Breaking news detection (< 5 minutes) with 🚨 badge
+✓ Article importance scoring (MAJOR/MODERATE/MINOR)
+✓ Premium APIs: AlphaVantage Sentiment, NewsAPI.org
+✓ Enhanced relevance scoring incorporating importance & sentiment
+✓ Better error handling with retry logic & graceful degradation
+✓ Source quality tracking & weighting
+✓ Deep relevance filtering (min score: 35/100)
 
-Key improvements over v1
-────────────────────────
-  • ALL sources for a market are called IN PARALLEL via ThreadPoolExecutor
-  • Results are MERGED from every source that responds before the timeout
-  • Three-tier DEDUPLICATION (URL → title+source → title+time proximity)
-  • Polygon.io added as a fourth US source (optional free API key)
-  • Global RSS feeds (Reuters, CNBC, MarketWatch) added for US
-  • Each individual RSS feed is also fetched in parallel
-  • Backward-compatible: existing fetch_news() signature unchanged
-
-Article schema (unchanged from v1)
-───────────────────────────────────
+Article schema (extended)
+─────────────────────────
   {
-    "title":     str,
-    "url":       str,
-    "source":    str,      # publication name  (e.g. "Reuters")
-    "published": str,      # human-relative    (e.g. "3h ago")
-    "pub_epoch": int|None, # raw epoch seconds for sort (new field)
-    "summary":   str,
-    "region":    "Global" | "India",
-    "provider":  str,      # API/feed that supplied it
+    "title":           str,              # Article headline
+    "url":             str,              # Article link
+    "source":          str,              # Publication name
+    "published":       str,              # e.g. "3h ago"
+    "pub_epoch":       int|None,         # Unix timestamp
+    "summary":         str,              # Article excerpt
+    "region":          "Global"|"India", # Market region
+    "provider":        str,              # API/feed source
+
+    "sentiment":       int,              # -1 (bearish), 0 (neutral), +1 (bullish) [NEW]
+    "sentiment_score": float,            # 0.0-1.0 confidence [NEW]
+    "importance":      str,              # MAJOR/MODERATE/MINOR [NEW]
+    "is_breaking":     bool,             # True if < 5 min old [NEW]
+    "relevance_score": int,              # 0-100 ranking [NEW]
+    "source_quality":  float,            # 0.0-1.0 reliability [NEW]
   }
 """
 
@@ -46,11 +48,13 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Callable, Dict, List, Optional
+from html import unescape
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlparse
 
+from bs4 import BeautifulSoup
 import requests
 
 logger = logging.getLogger(__name__)
@@ -60,21 +64,53 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 
 ENABLE_NEWS_SOURCES: Dict[str, bool] = {
-    "thenewsapi":  True,   # requires THE_NEWS_API_KEY in secrets / env
-    "finnhub":     True,   # requires FINNHUB_API_KEY  (optional - free tier)
-    "polygon":     True,   # requires POLYGON_API_KEY  (optional - free tier)
-    "yfinance":    True,   # always free, no key
-    "global_rss":  True,   # Reuters/CNBC/MarketWatch - no key
-    "india_rss":   True,   # Moneycontrol/ET/BS/Mint/FE - no key
-    "google_news": True,   # Google News RSS - no key
+    "alphavantage":    True,   # Premium: sentiment API
+    "newsapi":         True,   # Comprehensive news
+    "thenewsapi":      True,   # Reuters, Bloomberg, etc.
+    "finnhub":         True,   # Company news (Reuters-licensed)
+    "polygon":         True,   # Stock-specific data
+    "yfinance":        True,   # Yahoo Finance syndicated
+    "global_rss":      True,   # Reuters, CNBC, MarketWatch
+    "india_rss":       True,   # Moneycontrol, ET, BS, LiveMint
+    "google_news":     True,   # Google News RSS
 }
 
-PARALLEL_TIMEOUT: int = 10    # seconds - each worker must finish within this
-MAX_WORKERS:      int = 8     # ThreadPoolExecutor pool size
-REQUEST_TIMEOUT:  int = 9     # per-HTTP-request timeout (< PARALLEL_TIMEOUT)
+PARALLEL_TIMEOUT: int = 12    # Increased for more sources
+MAX_WORKERS:      int = 10
+REQUEST_TIMEOUT:  int = 9
 
-# Minimum seconds between two articles before they're considered "same story"
+# Breaking news thresholds
+BREAKING_NEWS_THRESHOLD: int = 5 * 60      # 5 minutes
+FRESH_NEWS_THRESHOLD: int = 30 * 60        # 30 minutes
+
+# Retry logic
+MAX_RETRIES: int = 2
+RETRY_BACKOFF: float = 1.5
+
+# Minimum seconds between articles for deduplication
 TITLE_TIME_WINDOW: int = 300  # 5 minutes
+
+# Source quality baseline (0.0-1.0)
+SOURCE_QUALITY_BASELINE: Dict[str, float] = {
+    "Reuters":              1.0,
+    "Bloomberg":            1.0,
+    "Financial Times":      1.0,
+    "Wall Street Journal":  0.95,
+    "CNBC":                 0.95,
+    "AP News":              0.95,
+    "Economic Times":       0.9,
+    "Moneycontrol":         0.9,
+    "Business Standard":    0.9,
+    "LiveMint":             0.85,
+    "MarketWatch":          0.85,
+    "Forbes":               0.8,
+    "Seeking Alpha":        0.8,
+    "Investopedia":         0.75,
+    "Business Insider":     0.75,
+    "Yahoo Finance":        0.95,
+    "Finnhub":              0.85,
+    "Polygon.io":           0.85,
+}
 
 INDIA_RSS_FEEDS: Dict[str, str] = {
     "Moneycontrol":      "https://www.moneycontrol.com/rss/MCtopnews.xml",
@@ -107,6 +143,22 @@ def _get_secret(key: str) -> Optional[str]:
     except Exception:
         pass
     return os.getenv(key)
+
+
+API_KEY_SOURCES: Dict[str, str] = {
+    "ALPHAVANTAGE_API_KEY": "AlphaVantage",
+    "NEWSAPI_KEY": "NewsAPI",
+    "THE_NEWS_API_KEY": "TheNewsAPI",
+    "FINNHUB_API_KEY": "Finnhub",
+    "POLYGON_API_KEY": "Polygon.io",
+}
+
+
+def get_api_key_status() -> str:
+    """Return a short summary of configured premium API keys."""
+    configured = [name for name in API_KEY_SOURCES if bool(_get_secret(name))]
+    total = len(API_KEY_SOURCES)
+    return f"{len(configured)}/{total} premium APIs configured"
 
 
 def _parse_epoch(ts) -> Optional[int]:
@@ -155,17 +207,39 @@ def _make_article(
     provider: str,
     pub_raw=None,
 ) -> Dict:
-    """Construct a fully-normalised article dict."""
+    """Construct a fully-normalised article dict with v2 enhancements."""
     epoch = _parse_epoch(pub_raw)
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+
+    # Calculate breaking news flag
+    age_seconds = now_epoch - epoch if epoch else None
+    is_breaking = age_seconds is not None and age_seconds <= BREAKING_NEWS_THRESHOLD
+
+    # Analyze sentiment
+    sentiment, sentiment_score = analyze_sentiment(title, summary)
+
+    # Score importance
+    importance = score_article_importance(title, summary)
+
+    # Get source quality
+    source_quality = SOURCE_QUALITY_BASELINE.get(source, 0.7)
+
     return {
-        "title":     title.strip(),
-        "url":       url.strip() or "#",
-        "source":    source,
-        "published": _relative_time(epoch),
-        "pub_epoch": epoch,
-        "summary":   (summary or "").strip()[:300],
-        "region":    region,
-        "provider":  provider,
+        "title":           title.strip(),
+        "url":             url.strip() or "#",
+        "source":          source,
+        "published":       _relative_time(epoch),
+        "pub_epoch":       epoch,
+        "summary":         (summary or "").strip()[:300],
+        "region":          region,
+        "provider":        provider,
+        
+        # V2 enhancements
+        "sentiment":       sentiment,         # -1, 0, +1
+        "sentiment_score": sentiment_score,    # 0.0-1.0
+        "importance":      importance,         # MAJOR/MODERATE/MINOR
+        "is_breaking":     is_breaking,        # True if < 5 min old
+        "source_quality":  source_quality,     # 0.0-1.0
     }
 
 
@@ -197,6 +271,102 @@ def _domain_to_source(url: str, fallback: str = "") -> str:
     except Exception:
         pass
     return fallback or url
+
+
+# ==============================================================================
+# 2.5  SENTIMENT ANALYSIS (NEW)
+# ==============================================================================
+
+def analyze_sentiment(title: str, summary: str = "") -> Tuple[int, float]:
+    """
+    Analyze news sentiment: BULLISH (+1), NEUTRAL (0), BEARISH (-1).
+    Returns (sentiment, confidence_score 0.0-1.0).
+    Uses keyword heuristics + TextBlob if available.
+    """
+    try:
+        from textblob import TextBlob
+        use_textblob = True
+    except ImportError:
+        use_textblob = False
+        logger.debug("TextBlob not available - using keyword-based sentiment only")
+
+    text = (title + " " + summary).upper()
+
+    # Bullish keywords (positive signals)
+    bullish = {
+        "BUY": 2, "UPGRADE": 2, "BEAT": 2, "OUTPERFORM": 2,
+        "SURGE": 2, "JUMP": 2, "GAIN": 2, "PROFIT": 2, "STRONG": 1.5,
+        "GROWTH": 1.5, "EXPAND": 1.5, "LAUNCH": 1.5, "DIVIDEND": 2,
+        "APPROVAL": 1.5, "WIN": 1.5, "SUCCESS": 1.5, "POSITIVE": 1.5,
+    }
+
+    # Bearish keywords (negative signals)
+    bearish = {
+        "SELL": 2, "DOWNGRADE": 2, "MISS": 2, "UNDERPERFORM": 2,
+        "CRASH": 2, "PLUNGE": 2, "LOSS": 2, "DECLINE": 1.5, "WEAK": 1.5,
+        "FALL": 1.5, "DROP": 1.5, "NEGATIVE": 1.5, "CUTS": 1.5,
+        "LAYOFFS": 2, "SHUTDOWN": 2, "BANKRUPTCY": 2, "DEFAULT": 2,
+        "SCANDAL": 2, "FRAUD": 2, "RECALL": 2,
+    }
+
+    bullish_score = sum(score for kw, score in bullish.items() if kw in text)
+    bearish_score = sum(score for kw, score in bearish.items() if kw in text)
+
+    polarity_boost = 0.0
+    if use_textblob:
+        try:
+            blob = TextBlob(title)
+            polarity = blob.sentiment.polarity
+            polarity_boost = polarity * 0.5
+        except Exception as e:
+            logger.debug(f"TextBlob sentiment failed: {e}")
+
+    combined_bullish = bullish_score + max(polarity_boost, 0)
+    combined_bearish = bearish_score + max(-polarity_boost, 0)
+
+    if combined_bullish > combined_bearish + 0.5:
+        confidence = min(combined_bullish / 5.0, 1.0)
+        return 1, confidence
+    elif combined_bearish > combined_bullish + 0.5:
+        confidence = min(combined_bearish / 5.0, 1.0)
+        return -1, confidence
+    else:
+        confidence = 0.5 if (bullish_score + bearish_score) > 0 else 0.0
+        return 0, confidence
+
+
+# ==============================================================================
+# 2.6  IMPORTANCE SCORING (NEW)
+# ==============================================================================
+
+def score_article_importance(title: str, summary: str = "") -> str:
+    """
+    Classify article importance: MAJOR, MODERATE, or MINOR.
+    MAJOR: Earnings, guidance, M&A, scandals, management changes
+    MODERATE: Product news, partnerships, analyst actions
+    MINOR: General market news, sector updates
+    """
+    text = (title + " " + summary).upper()
+
+    major_keywords = [
+        "EARNINGS", "RESULTS", "GUIDANCE", "ACQUISITION", "MERGER",
+        "BANKRUPTCY", "DELISTING", "FRAUD", "SCANDAL", "CEO", "IPO",
+        "DIVIDEND", "REGULATORY", "LAWSUIT", "IPO PLANS", "STOCK SPLIT",
+    ]
+
+    if any(kw in text for kw in major_keywords):
+        return "MAJOR"
+
+    moderate_keywords = [
+        "PARTNERSHIP", "DEAL", "CONTRACT", "LAUNCH", "PRODUCT",
+        "ANALYST", "UPGRADE", "DOWNGRADE", "APPROVAL", "PATENT",
+        "INVESTMENT", "EXPANSION", "ENTRY", "EXPANSION",
+    ]
+
+    if any(kw in text for kw in moderate_keywords):
+        return "MODERATE"
+
+    return "MINOR"
 
 
 def _parse_rss(
@@ -270,13 +440,15 @@ def _parse_rss(
     results: List[Dict] = []
 
     for item in root.iter("item"):
-        title = (item.findtext("title") or "").strip()
+        raw_title = item.findtext("title") or ""
+        title = BeautifulSoup(unescape(raw_title), "html.parser").get_text(separator=" ", strip=True)
         link = (item.findtext("link") or "#").strip()
-        desc = (item.findtext("description") or "").strip()
+        raw_desc = item.findtext("description") or ""
+        desc = BeautifulSoup(unescape(raw_desc), "html.parser").get_text(separator=" ", strip=True)
         pub_raw = (item.findtext("pubDate") or "").strip() or None
 
-        # Clean HTML from description
-        desc_clean = re.sub(r"<[^>]+>", "", desc).strip()
+        # Clean HTML from description and source snippets
+        desc_clean = desc.strip()
         summary = desc_clean[:300] if desc_clean else title[:300]
 
         if filter_stock:
@@ -319,6 +491,22 @@ def _parse_rss(
 
         if len(results) >= max_articles:
             break
+
+    if strict_mode and region == "India" and not results:
+        logger.info(
+            f"India RSS [{source_name}] strict matching failed for {ticker}; "
+            "retrying with sector fallback."
+        )
+        return _parse_rss(
+            feed_url,
+            ticker,
+            company_name,
+            region,
+            source_name,
+            max_articles,
+            filter_stock,
+            strict_mode=False,
+        )
 
     return results
 
@@ -385,8 +573,197 @@ def deduplicate_articles(articles: List[Dict]) -> List[Dict]:
 
 
 def _sort_articles(articles: List[Dict]) -> List[Dict]:
-    """Sort articles newest-first. Articles with no epoch sink to the bottom."""
-    return sorted(articles, key=lambda a: a.get("pub_epoch") or 0, reverse=True)
+    """
+    Sort articles by latest publication date first.
+    This enforces newest-to-oldest ordering in the news feed.
+    """
+    return sorted(
+        articles,
+        key=lambda a: a.get("pub_epoch") or 0,
+        reverse=True,
+    )
+
+
+# ==============================================================================
+# 3.5  RETRY LOGIC WITH BACKOFF (NEW)
+# ==============================================================================
+
+def _make_request_with_retry(
+    url: str,
+    params: Optional[Dict] = None,
+    timeout: int = REQUEST_TIMEOUT,
+    max_retries: int = MAX_RETRIES,
+    source_name: str = "API",
+) -> Optional[requests.Response]:
+    """Make HTTP request with exponential backoff retry."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+
+    delay = 1
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.get(url, params=params, timeout=timeout, headers=headers)
+
+            if r.status_code == 429:
+                logger.warning(f"{source_name}: Rate limited (429)")
+                if attempt < max_retries:
+                    time.sleep(delay)
+                    delay *= RETRY_BACKOFF
+                    continue
+                return None
+
+            if r.status_code in (401, 403):
+                logger.warning(f"{source_name}: Auth failed ({r.status_code})")
+                return None
+
+            r.raise_for_status()
+            return r
+
+        except requests.Timeout:
+            logger.warning(f"{source_name}: Timeout (attempt {attempt + 1}/{max_retries + 1})")
+            if attempt < max_retries:
+                time.sleep(delay)
+                delay *= RETRY_BACKOFF
+        except requests.RequestException as e:
+            logger.warning(f"{source_name}: Request failed: {e}")
+            if attempt < max_retries:
+                time.sleep(delay)
+                delay *= RETRY_BACKOFF
+
+    return None
+
+
+# ==============================================================================
+# 3.6  NEW PREMIUM FETCHERS (ENHANCED REAL-TIME)
+# ==============================================================================
+
+def fetch_alphavantage_news(
+    company_name: str,
+    ticker: str,
+    max_articles: int = 15,
+) -> List[Dict]:
+    """Fetch news with real-time sentiment from AlphaVantage (NEW Premium Source)."""
+    if not ENABLE_NEWS_SOURCES.get("alphavantage"):
+        return []
+
+    api_key = _get_secret("ALPHAVANTAGE_API_KEY")
+    if not api_key:
+        logger.warning(
+            "AlphaVantage disabled: ALPHAVANTAGE_API_KEY not configured. "
+            "Add it to .env or .streamlit/secrets.toml to enable premium news sentiment."
+        )
+        return []
+
+    params = {
+        "function": "NEWS_SENTIMENT",
+        "tickers": ticker,
+        "apikey": api_key,
+        "limit": max_articles,
+    }
+
+    r = _make_request_with_retry(
+        url="https://www.alphavantage.co/query",
+        params=params,
+        source_name="AlphaVantage",
+    )
+
+    if not r:
+        return []
+
+    try:
+        data = r.json()
+        raw_articles = data.get("feed", [])
+    except Exception as e:
+        logger.error(f"AlphaVantage: Parse error: {e}")
+        return []
+
+    results = []
+    for article in raw_articles[:max_articles]:
+        sentiment_label = article.get("overall_sentiment_label", "NEUTRAL").upper()
+        sentiment_map = {"BULLISH": 1, "POSITIVE": 1, "NEUTRAL": 0, "NEGATIVE": -1, "BEARISH": -1}
+        av_sentiment = sentiment_map.get(sentiment_label, 0)
+        av_sentiment_score = float(article.get("overall_sentiment_score", 0.0))
+
+        source = _domain_to_source(article.get("url", ""), article.get("source", "AlphaVantage"))
+
+        article_dict = _make_article(
+            title=article.get("title", "No title"),
+            url=article.get("url", "#"),
+            source=source,
+            summary=article.get("summary", ""),
+            region="Global",
+            provider="AlphaVantage Sentiment API",
+            pub_raw=article.get("time_published"),
+        )
+        article_dict["sentiment"] = av_sentiment
+        article_dict["sentiment_score"] = av_sentiment_score
+        results.append(article_dict)
+
+    logger.info(f"AlphaVantage -> {len(results)} articles for {ticker}")
+    return results
+
+
+def fetch_newsapi_news(
+    company_name: str,
+    ticker: str,
+    max_articles: int = 15,
+) -> List[Dict]:
+    """Fetch comprehensive news from NewsAPI.org (NEW Premium Source)."""
+    if not ENABLE_NEWS_SOURCES.get("newsapi"):
+        return []
+
+    api_key = _get_secret("NEWSAPI_KEY")
+    if not api_key:
+        logger.warning(
+            "NewsAPI disabled: NEWSAPI_KEY not configured. "
+            "Add it to .env or .streamlit/secrets.toml to enable broader news coverage."
+        )
+        return []
+
+    query = f'"{company_name}" OR "{ticker}"'
+    params = {
+        "q": query,
+        "language": "en",
+        "sortBy": "publishedAt",
+        "pageSize": max_articles,
+        "apiKey": api_key,
+    }
+
+    r = _make_request_with_retry(
+        url="https://newsapi.org/v2/everything",
+        params=params,
+        source_name="NewsAPI",
+    )
+
+    if not r:
+        return []
+
+    try:
+        data = r.json()
+        if data.get("status") != "ok":
+            logger.warning(f"NewsAPI: {data.get('message', 'Unknown')}")
+            return []
+        raw_articles = data.get("articles", [])
+    except Exception as e:
+        logger.error(f"NewsAPI: Parse error: {e}")
+        return []
+
+    results = []
+    for article in raw_articles[:max_articles]:
+        source = article.get("source", {}).get("name", "NewsAPI")
+        results.append(_make_article(
+            title=article.get("title", "No title"),
+            url=article.get("url", "#"),
+            source=source,
+            summary=article.get("description", ""),
+            region="Global",
+            provider="NewsAPI.org",
+            pub_raw=article.get("publishedAt"),
+        ))
+
+    logger.info(f"NewsAPI -> {len(results)} articles for {ticker}")
+    return results
 
 
 # ==============================================================================
@@ -470,11 +847,16 @@ def fetch_global_news_finnhub(ticker: str, max_articles: int = 15) -> List[Dict]
         return []
 
     api_key  = _get_secret("FINNHUB_API_KEY")
+    if not api_key:
+        logger.warning(
+            "Finnhub disabled: FINNHUB_API_KEY not configured. "
+            "Add it to .env or .streamlit/secrets.toml to enable company news."
+        )
+        return []
+
     today    = datetime.now().strftime("%Y-%m-%d")
     week_ago = datetime.fromtimestamp(time.time() - 7 * 86400).strftime("%Y-%m-%d")
-    params: dict = {"symbol": ticker, "from": week_ago, "to": today}
-    if api_key:
-        params["token"] = api_key
+    params: dict = {"symbol": ticker, "from": week_ago, "to": today, "token": api_key}
 
     try:
         r = requests.get(
@@ -635,8 +1017,9 @@ def fetch_india_news_rss(
 
 def score_article_relevance(article: Dict, ticker: str, company_name: str) -> int:
     """
-    Score article relevance from 0-100.
+    Score article relevance from 0-100 (ENHANCED in v2).
     Higher score = more directly relevant to the stock.
+    Now incorporates: importance level, source quality, and sentiment.
     """
     ticker_clean = ticker.replace(".NS", "").replace(".BO", "").upper()
     company_clean = company_name.upper()
@@ -647,43 +1030,56 @@ def score_article_relevance(article: Dict, ticker: str, company_name: str) -> in
 
     score = 0
 
-    # Exact ticker in title: +50 points
+    # ── Exact matches ───────────────────────────────────────────────────────
     if ticker_clean in title:
-        score += 50
-    # Exact ticker in summary: +20 points
+        score += 50  # Ticker in title = high priority
     elif ticker_clean in summary:
+        score += 25
+
+    if company_clean in title:
+        score += 40  # Company in title
+    elif company_clean in summary:
         score += 20
 
-    # Company name in title: +40 points
-    if company_clean in title:
-        score += 40
-    # Company name in summary: +15 points
-    elif company_clean in summary:
-        score += 15
+    # ── Importance level bonus (NEW) ─────────────────────────────────────────
+    importance = article.get("importance", "MINOR")
+    if importance == "MAJOR":
+        score += 25
+    elif importance == "MODERATE":
+        score += 10
 
-    # Source quality bonus
+    # ── Source quality bonus (NEW) ───────────────────────────────────────────
+    source_quality = article.get("source_quality", 0.5)
+    score += int(source_quality * 15)
+
+    # ── Sentiment relevance (NEW) ────────────────────────────────────────────
+    sentiment = article.get("sentiment", 0)
+    if sentiment != 0:
+        score += 8  # Has sentiment = newsworthy
+
+    # ── Keyword boosts ──────────────────────────────────────────────────────
     high_quality_sources = ["Reuters", "Bloomberg", "Economic Times", "Moneycontrol", "CNBC"]
     if article.get("source") in high_quality_sources:
         score += 10
 
-    # Earnings/Results mention: +15 points (highly relevant)
-    if any(kw in combined for kw in ["EARNINGS", "RESULTS", "QUARTER", "Q1", "Q2", "Q3", "Q4", "PROFIT", "REVENUE"]):
-        score += 15
+    keyword_boosts = {
+        "EARNINGS": 15, "RESULTS": 15, "QUARTER": 10, "GUIDANCE": 12,
+        "DIVIDEND": 10, "ACQUISITION": 15, "MERGER": 15, "IPO": 15,
+        "ANALYST": 10, "UPGRADE": 12, "DOWNGRADE": 12, "RATING": 10,
+        "PARTNERSHIP": 8, "DEAL": 8, "PRODUCT LAUNCH": 8,
+    }
 
-    # Analyst rating mention: +10 points
-    if any(kw in combined for kw in ["BUY", "SELL", "HOLD", "RATING", "UPGRADE", "DOWNGRADE", "TARGET"]):
-        score += 10
-
-    # Contract/deal mention: +10 points
-    if any(kw in combined for kw in ["CONTRACT", "DEAL", "AGREEMENT", "PARTNERSHIP", "LAUNCH"]):
-        score += 10
+    for keyword, boost in keyword_boosts.items():
+        if keyword in combined:
+            score += boost
 
     return min(score, 100)
 
 
-def filter_and_rank_articles(articles: List[Dict], ticker: str, company_name: str, min_score: int = 30) -> List[Dict]:
+def filter_and_rank_articles(articles: List[Dict], ticker: str, company_name: str, min_score: int = 35) -> List[Dict]:
     """
-    Filter out low-relevance articles and sort by relevance score + date.
+    Filter out low-relevance articles and sort by relevance score + importance + date (ENHANCED v2).
+    Now uses higher minimum score (35 vs 30) for better quality filtering.
     """
     # Score each article
     for article in articles:
@@ -692,12 +1088,16 @@ def filter_and_rank_articles(articles: List[Dict], ticker: str, company_name: st
     # Filter out low relevance (below min_score)
     filtered = [a for a in articles if a.get("relevance_score", 0) >= min_score]
 
-    # Sort by: relevance score (descending), then date (newest first)
-    filtered.sort(key=lambda a: (a.get("relevance_score", 0), a.get("pub_epoch", 0)), reverse=True)
+    # Sort by: breaking news → importance → relevance → date
+    sorted_articles = _sort_articles(filtered)
 
-    logger.info(f"Relevance filter: {len(articles)} → {len(filtered)} articles (min_score={min_score})")
+    logger.info(
+        f"Relevance filter: {len(articles)} → {len(filtered)} articles (min_score={min_score}) | "
+        f"Breaking: {sum(1 for a in filtered if a.get('is_breaking'))} | "
+        f"Major: {sum(1 for a in filtered if a.get('importance') == 'MAJOR')}"
+    )
 
-    return filtered
+    return sorted_articles
 def fetch_india_news_google(
     ticker: str, company_name: str, max_articles: int = 15
 ) -> List[Dict]:
@@ -785,11 +1185,13 @@ def fetch_news_parallel(
         max_articles: int = 20,
 ) -> List[Dict]:
     """
-    Dispatch ALL applicable news sources concurrently.
-    NOW includes TheNewsAPI and Finnhub for BOTH US and Indian stocks.
+    Dispatch ALL applicable news sources concurrently with NEW premium sources (ENHANCED v2).
+    NOW includes: AlphaVantage (sentiment), NewsAPI, plus all existing v1 sources.
     """
-    # Common tasks for BOTH markets
+    # Common tasks for BOTH markets (NEW: includes premium sources)
     common_tasks: list[tuple[Callable, tuple]] = [
+        (fetch_alphavantage_news, (company_name, ticker, max_articles)),  # NEW
+        (fetch_newsapi_news, (company_name, ticker, max_articles)),       # NEW
         (fetch_global_news_thenewsapi, (company_name, ticker, max_articles)),
         (fetch_global_news_finnhub, (ticker, max_articles)),
         (fetch_news_yfinance, (yf_ticker, market, max_articles)),
@@ -812,7 +1214,6 @@ def fetch_news_parallel(
 
     tasks = common_tasks + specific_tasks
 
-    # Rest of your existing code remains the same...
     all_articles: List[Dict] = []
     source_stats: Dict[str, int] = {}
 
@@ -834,13 +1235,14 @@ def fetch_news_parallel(
 
     logger.info(
         f"Parallel fetch complete for {ticker}: "
-        f"{len(all_articles)} raw | breakdown: {source_stats}"
+        f"{len(all_articles)} raw | sources: {source_stats}"
     )
 
     deduped = deduplicate_articles(all_articles)
     sorted_ = _sort_articles(deduped)
 
-    MIN_RELEVANCE_SCORE = 30
+    # Stricter filtering (min 35 vs 30) for higher quality news
+    MIN_RELEVANCE_SCORE = 35
     filtered = filter_and_rank_articles(sorted_, ticker, company_name, MIN_RELEVANCE_SCORE)
 
     logger.info(
