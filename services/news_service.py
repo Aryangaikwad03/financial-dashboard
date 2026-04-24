@@ -113,7 +113,7 @@ SOURCE_QUALITY_BASELINE: Dict[str, float] = {
 }
 
 INDIA_RSS_FEEDS: Dict[str, str] = {
-    "Moneycontrol":      "https://www.moneycontrol.com/rss/MCtopnews.xml",
+    "Moneycontrol":      "https://www.moneycontrol.com/rss/latestnews.xml",
     "Economic Times":    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
     "Business Standard": "https://www.business-standard.com/rss/markets-106.rss",
     "LiveMint":          "https://www.livemint.com/rss/markets",
@@ -121,8 +121,9 @@ INDIA_RSS_FEEDS: Dict[str, str] = {
 }
 
 GLOBAL_RSS_FEEDS: Dict[str, str] = {
-    "Reuters":       "https://feeds.reuters.com/reuters/businessNews",
-    "CNBC":          "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "Reuters":       "https://www.reutersagency.com/feed/",
+    "CNBC":          "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147",
+    "WSJ":           "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
     "MarketWatch":   "https://feeds.content.dowjones.io/public/rss/mw_marketpulse",
     "Seeking Alpha": "https://seekingalpha.com/market_currents.xml",
     "Investopedia":  "https://www.investopedia.com/feedbuilder/feed/getfeed?feedName=rss_headline",
@@ -152,6 +153,91 @@ API_KEY_SOURCES: Dict[str, str] = {
     "FINNHUB_API_KEY": "Finnhub",
     "POLYGON_API_KEY": "Polygon.io",
 }
+
+# Company aliases and search terms for better news matching
+COMPANY_ALIASES: Dict[str, List[str]] = {
+    # Indian Companies
+    "RELIANCE": ["Reliance Industries", "RIL", "Mukesh Ambani", "Jio", "Reliance Jio", "Reliance Retail"],
+    "TCS": ["Tata Consultancy Services", "Tata Consultancy", "TCS Ltd", "Tata Sons"],
+    "INFY": ["Infosys", "Infosys Ltd", "Infosys Technologies"],
+    "HDFCBANK": ["HDFC Bank", "HDFC", "Housing Development Finance Corporation"],
+    "ICICIBANK": ["ICICI Bank", "ICICI", "Industrial Credit and Investment Corporation"],
+    "SBIN": ["State Bank of India", "SBI", "State Bank"],
+    "BHARTIARTL": ["Bharti Airtel", "Airtel", "Bharti", "Airtel Ltd"],
+    "KOTAKBANK": ["Kotak Mahindra Bank", "Kotak Bank", "Kotak Mahindra"],
+    "LT": ["Larsen & Toubro", "L&T", "Larsen Toubro"],
+    "ASIANPAINT": ["Asian Paints", "Asian Paints Ltd"],
+    "AXISBANK": ["Axis Bank", "Axis Bank Ltd"],
+    "MARUTI": ["Maruti Suzuki", "Maruti Suzuki India"],
+    "WIPRO": ["Wipro Ltd", "Wipro Technologies"],
+    "HCLTECH": ["HCL Technologies", "HCL", "Hindustan Computers Limited"],
+    "ULTRACEMCO": ["UltraTech Cement", "UltraTech"],
+    "TITAN": ["Titan Company", "Titan Industries"],
+    "NESTLEIND": ["Nestle India", "Nestlé"],
+    "SUNPHARMA": ["Sun Pharmaceutical", "Sun Pharma"],
+    "DRREDDY": ["Dr. Reddy's Laboratories", "Dr Reddys", "DRL"],
+    "CIPLA": ["Cipla Ltd"],
+    "TECHM": ["Tech Mahindra", "Tech Mahindra Ltd"],
+    "TATAMOTORS": ["Tata Motors", "Tata Motors Ltd", "Jaguar Land Rover"],
+    "TATASTEEL": ["Tata Steel", "Tata Steel Ltd"],
+    "JSWSTEEL": ["JSW Steel", "JSW Steel Ltd"],
+    "HINDALCO": ["Hindalco Industries", "Hindalco", "Aditya Birla Group"],
+    "ADANIENT": ["Adani Enterprises", "Adani Group", "Adani Enterprises Ltd"],
+    "ADANIPORTS": ["Adani Ports", "Adani Ports and SEZ", "Adani Ports Ltd"],
+    "COALINDIA": ["Coal India", "Coal India Ltd"],
+    "DIVISLAB": ["Divi's Laboratories", "Divis Labs"],
+    "GRASIM": ["Grasim Industries", "Grasim", "Aditya Birla Group"],
+    "BPCL": ["Bharat Petroleum", "BPCL", "Bharat Petroleum Corporation"],
+    "INDUSINDBK": ["IndusInd Bank", "IndusInd"],
+    "EICHERMOT": ["Eicher Motors", "Eicher", "Royal Enfield"],
+    "HEROMOTOCO": ["Hero MotoCorp", "Hero Honda", "Hero MotoCorp Ltd"],
+    "SHREECEM": ["Shree Cement", "Shree Cement Ltd"],
+    "PIDILITIND": ["Pidilite Industries", "Pidilite", "Fevikwik"],
+    "DABUR": ["Dabur India", "Dabur"],
+    "GODREJCP": ["Godrej Consumer Products", "Godrej", "Godrej Group"],
+    "LUPIN": ["Lupin Ltd", "Lupin Pharmaceuticals"],
+    "BIOCON": ["Biocon Ltd", "Biocon"],
+    "AUROPHARMA": ["Aurobindo Pharma", "Aurobindo"],
+    "TORNTPHARM": ["Torrent Pharmaceuticals", "Torrent Pharma"],
+    "CADILAHC": ["Cadila Healthcare", "Cadila", "Zydus Cadila"],
+    
+    # US Companies (major ones)
+    "AAPL": ["Apple Inc", "Apple", "iPhone", "iPad", "MacBook"],
+    "MSFT": ["Microsoft", "Microsoft Corporation", "Windows", "Azure", "Office"],
+    "GOOGL": ["Alphabet", "Alphabet Inc", "Google", "YouTube", "Android"],
+    "AMZN": ["Amazon", "Amazon.com", "AWS", "Alexa"],
+    "TSLA": ["Tesla", "Tesla Inc", "Elon Musk", "Electric Vehicle"],
+    "NVDA": ["NVIDIA", "Nvidia", "Graphics Card", "GPU"],
+    "META": ["Meta Platforms", "Facebook", "Instagram", "WhatsApp"],
+    "NFLX": ["Netflix", "Netflix Inc"],
+    "AMD": ["Advanced Micro Devices", "AMD"],
+    "INTC": ["Intel", "Intel Corporation"],
+}
+
+
+def _build_enhanced_search_query(ticker: str, company_name: str, max_terms: int = 5) -> str:
+    """
+    Build an enhanced search query using company name, ticker, and aliases.
+    Returns a NewsAPI-compatible query string with OR conditions.
+    """
+    ticker_clean = ticker.replace(".NS", "").replace(".BO", "").upper()
+    
+    # Start with core terms
+    search_terms = set()
+    search_terms.add(f'"{company_name}"')
+    search_terms.add(f'"{ticker_clean}"')
+    
+    # Add aliases if available (exclude duplicates of company name)
+    aliases = COMPANY_ALIASES.get(ticker_clean, [])
+    for alias in aliases:
+        if alias.lower() not in company_name.lower() and alias.upper() != ticker_clean:
+            search_terms.add(f'"{alias}"')
+            if len(search_terms) >= max_terms:
+                break
+    
+    # Join with OR for NewsAPI
+    query = " OR ".join(search_terms)
+    return query
 
 
 def get_api_key_status() -> str:
@@ -408,13 +494,17 @@ def _parse_rss(
     bare_ticker = ticker.replace(".NS", "").replace(".BO", "").upper()
     company_short = company_name.split(" ")[0].upper() if company_name else bare_ticker
 
-    # EXACT match terms (strict)
+    # EXACT match terms (strict) - ENHANCED with aliases
     exact_terms = list({
         bare_ticker,
         company_short,
         ticker.upper(),
         company_name.upper(),
     })
+    
+    # Add company aliases for better matching
+    aliases = COMPANY_ALIASES.get(bare_ticker, [])
+    exact_terms.extend(alias.upper() for alias in aliases)
 
     # Sector mapping for Indian stocks (smart filtering)
     SECTOR_KEYWORDS = {
@@ -709,7 +799,7 @@ def fetch_newsapi_news(
     ticker: str,
     max_articles: int = 15,
 ) -> List[Dict]:
-    """Fetch comprehensive news from NewsAPI.org (NEW Premium Source)."""
+    """Fetch comprehensive news from NewsAPI.org (ENHANCED with aliases)."""
     if not ENABLE_NEWS_SOURCES.get("newsapi"):
         return []
 
@@ -721,7 +811,9 @@ def fetch_newsapi_news(
         )
         return []
 
-    query = f'"{company_name}" OR "{ticker}"'
+    # Use enhanced search query with company aliases
+    query = _build_enhanced_search_query(ticker, company_name)
+    logger.debug(f"NewsAPI search query for {ticker}: {query}")
     params = {
         "q": query,
         "language": "en",
@@ -1017,9 +1109,9 @@ def fetch_india_news_rss(
 
 def score_article_relevance(article: Dict, ticker: str, company_name: str) -> int:
     """
-    Score article relevance from 0-100 (ENHANCED in v2).
+    Score article relevance from 0-100 (ENHANCED with aliases).
     Higher score = more directly relevant to the stock.
-    Now incorporates: importance level, source quality, and sentiment.
+    Now incorporates: importance level, source quality, sentiment, and aliases.
     """
     ticker_clean = ticker.replace(".NS", "").replace(".BO", "").upper()
     company_clean = company_name.upper()
@@ -1040,6 +1132,16 @@ def score_article_relevance(article: Dict, ticker: str, company_name: str) -> in
         score += 40  # Company in title
     elif company_clean in summary:
         score += 20
+
+    # ── Alias matches (ENHANCED) ────────────────────────────────────────────
+    aliases = COMPANY_ALIASES.get(ticker_clean, [])
+    alias_match_title = any(alias.upper() in title for alias in aliases)
+    alias_match_summary = any(alias.upper() in summary for alias in aliases)
+    
+    if alias_match_title:
+        score += 35  # Alias in title (high relevance)
+    elif alias_match_summary:
+        score += 15  # Alias in summary
 
     # ── Importance level bonus (NEW) ─────────────────────────────────────────
     importance = article.get("importance", "MINOR")
@@ -1102,13 +1204,24 @@ def fetch_india_news_google(
     ticker: str, company_name: str, max_articles: int = 15
 ) -> List[Dict]:
     """
-    Google News RSS for Indian stocks, localised to IN:en.
+    Google News RSS for Indian stocks, localised to IN:en (ENHANCED with aliases).
     No API key required.
     """
     if not ENABLE_NEWS_SOURCES.get("google_news"):
         return []
 
-    query = quote(f"{company_name} NSE stock")
+    # Build enhanced query with company name and key aliases
+    ticker_clean = ticker.replace(".NS", "").replace(".BO", "").upper()
+    aliases = COMPANY_ALIASES.get(ticker_clean, [])
+    
+    # Use company name + first alias + "NSE stock" for better results
+    query_parts = [company_name]
+    if aliases:
+        query_parts.append(aliases[0])  # Add primary alias
+    query_parts.append("NSE stock")
+    
+    query = quote(" ".join(query_parts))
+    logger.debug(f"Google News search query for {ticker}: {' '.join(query_parts)}")
     url   = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
 
     articles = _parse_rss(

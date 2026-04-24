@@ -64,7 +64,7 @@ ENABLE_NEWS_SOURCES: Dict[str, bool] = {
     "polygon":         True,   # Stock-specific data
     "yfinance":        True,   # Yahoo Finance syndicated
     "global_rss":      True,   # Reuters, CNBC, MarketWatch, etc.
-    "india_rss":       True,   # Moneycontrol, ET, BS, LiveMint
+    "india_rss":       False,  # Disabled: causes duplicate generic articles for Indian stocks
     "google_news":     True,   # Google News RSS
 }
 
@@ -86,7 +86,7 @@ TITLE_TIME_WINDOW: int = 300  # 5 minutes
 
 # RSS feeds (enhanced)
 INDIA_RSS_FEEDS: Dict[str, str] = {
-    "Moneycontrol":      "https://www.moneycontrol.com/rss/MCtopnews.xml",
+    "Moneycontrol":      "https://www.moneycontrol.com/rss/latestnews.xml",
     "Economic Times":    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
     "Business Standard": "https://www.business-standard.com/rss/markets-106.rss",
     "LiveMint":          "https://www.livemint.com/rss/markets",
@@ -94,8 +94,9 @@ INDIA_RSS_FEEDS: Dict[str, str] = {
 }
 
 GLOBAL_RSS_FEEDS: Dict[str, str] = {
-    "Reuters":       "https://feeds.reuters.com/reuters/businessNews",
-    "CNBC":          "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "Reuters":       "https://www.reutersagency.com/feed/",
+    "CNBC":          "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147",
+    "WSJ":           "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
     "MarketWatch":   "https://feeds.content.dowjones.io/public/rss/mw_marketpulse",
     "Seeking Alpha": "https://seekingalpha.com/market_currents.xml",
     "Investopedia":  "https://www.investopedia.com/feedbuilder/feed/getfeed?feedName=rss_headline",
@@ -352,14 +353,14 @@ def score_article_relevance(
     
     # ── Exact matches (high priority) ────────────────────────────────────────
     if ticker_clean in title:
-        score += 50  # Ticker in title = core relevance
+        score += 60  # Ticker in title = core relevance (increased)
     elif ticker_clean in summary:
-        score += 25
+        score += 30  # (increased)
     
     if company_clean in title:
-        score += 40  # Company name in title
+        score += 50  # Company name in title (increased)
     elif company_clean in summary:
-        score += 20
+        score += 25  # (increased)
     
     # ── Importance bonus ─────────────────────────────────────────────────────
     importance = article.get("importance", "MINOR")
@@ -384,14 +385,40 @@ def score_article_relevance(
         "ANALYST": 10, "UPGRADE": 12, "DOWNGRADE": 12,
         "PARTNERSHIP": 8, "DEAL": 8, "PRODUCT LAUNCH": 8,
         "CEO": 10, "MANAGEMENT CHANGE": 10,
+        "BANKRUPTCY": 15, "LAWSUIT": 12, "REGULATORY": 10,
+        "RECALL": 12, "SCANDAL": 10,
     }
     
     for keyword, boost in keyword_boosts.items():
         if keyword in combined:
             score += boost
     
+    # ── Context checks: Penalize generic articles ──────────────────────────
+    generic_indicators = ["MARKET ROUNDUP", "STOCKS TO WATCH", "TODAY'S MARKET", "WALL STREET"]
+    for indicator in generic_indicators:
+        if indicator in title:
+            score -= 20  # Penalize generic market articles
+    
+    # ── Penalize articles mentioning many companies (roundup articles) ─────
+    common_companies = ["RELIANCE", "TCS", "INFY", "HDFC", "ICICI", "BAJAJ", "MARUTI", "TATA", "WIPRO", "ITC", "HUL", "NTPC", "ONGC", "COALINDIA", "POWERGRID", "GAIL", "BPCL", "IOC", "HINDALCO", "JSWSTEEL"]
+    mentioned_companies = sum(1 for comp in common_companies if comp in combined)
+    if mentioned_companies > 3:
+        score -= 30  # Heavy penalty for roundup articles mentioning many stocks
+    
+    # ── Subject position bonus: If stock is first in title ──────────────────
+    title_words = title.split()
+    if title_words and (ticker_clean in title_words[0] or company_clean in title_words[0]):
+        score += 10  # Main subject bonus
+    
+    # ── Multiple mentions bonus ─────────────────────────────────────────────
+    ticker_count = combined.count(ticker_clean)
+    company_count = combined.count(company_clean)
+    total_mentions = ticker_count + company_count
+    if total_mentions > 2:
+        score += 5  # More mentions = more relevant
+    
     # Normalize to 0-100
-    return min(score, 100)
+    return min(max(score, 0), 100)
 
 
 # ==============================================================================
@@ -722,16 +749,11 @@ def deduplicate_articles(articles: List[Dict]) -> List[Dict]:
 
 def _sort_articles(articles: List[Dict]) -> List[Dict]:
     """
-    Sort by: breaking news first → importance → relevance → date.
+    Sort by date: newest first.
     """
     return sorted(
         articles,
-        key=lambda a: (
-            not a.get("is_breaking", False),  # Breaking news first
-            {"MAJOR": 0, "MODERATE": 1, "MINOR": 2}.get(a.get("importance", "MINOR"), 2),
-            -a.get("relevance_score", 0),      # Relevance descending
-            -a.get("pub_epoch", 0),            # Date descending
-        ),
+        key=lambda a: -a.get("pub_epoch", 0),  # Date descending (newest first)
     )
 
 
@@ -757,7 +779,7 @@ def rank_articles(
         )
     
     # Filter by minimum relevance
-    filtered = [a for a in articles if a.get("relevance_score", 0) >= min_relevance_score]
+    filtered = [a for a in articles if a.get("relevance_score", 0) >= 70]
     
     logger.info(
         f"Relevance filter: {len(articles)} → {len(filtered)} articles "
@@ -784,11 +806,7 @@ def fetch_news_v2(
     """
     Enhanced news fetcher with sentiment, importance, breaking news, and better ranking.
     
-    Returns articles sorted by:
-    1. Breaking news badge (< 5 min)
-    2. Importance (MAJOR > MODERATE > MINOR)
-    3. Relevance score
-    4. Freshness (newest first)
+    Returns articles sorted by date (newest first), filtered for strict relevance to the stock.
     
     Each article includes:
     - sentiment: -1 (bearish), 0 (neutral), +1 (bullish)
