@@ -31,11 +31,12 @@ import html
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from pathlib import Path
 from plotly.subplots import make_subplots
 
 import services.portfolio_db as portfolio_db
 
-DB_PATH = portfolio_db.DB_PATH
+DB_PATH = Path(portfolio_db.DB_PATH)
 add_stock = portfolio_db.add_stock
 clear_portfolio = getattr(portfolio_db, "clear_portfolio", None)
 get_portfolio = portfolio_db.get_portfolio
