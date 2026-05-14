@@ -7,17 +7,18 @@ Uses SQLite so no external database server is required.
 
 import sqlite3
 import logging
+from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "portfolio.db"
+DB_PATH = Path(__file__).resolve().parent.parent / "portfolio.db"
 
 
 def get_connection() -> sqlite3.Connection:
     """Create and return a SQLite database connection."""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row  # Return rows as dict-like objects
     return conn
 

@@ -81,10 +81,31 @@ def format_market_cap(value: float, market: str) -> str:
 
 def safe_get(info: Dict, key: str, default: Any = None) -> Any:
     """Safely extract a value from yfinance info dict, returning default on missing/NaN."""
+    if not isinstance(info, dict):
+        return default
     val = info.get(key, default)
     if isinstance(val, float) and np.isnan(val):
         return default
     return val
+
+
+def _load_yfinance_info(stock) -> Dict[str, Any]:
+    """Load yfinance metadata from the best available source."""
+    info = {}
+    try:
+        info = stock.info or {}
+    except Exception as e:
+        logger.warning(f"yfinance stock.info access failed: {e}")
+        info = {}
+
+    if not info and hasattr(stock, "get_info"):
+        try:
+            info = stock.get_info() or {}
+        except Exception as e:
+            logger.warning(f"yfinance stock.get_info() failed: {e}")
+            info = {}
+
+    return info or {}
 
 
 def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
@@ -104,19 +125,29 @@ def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
         logger.info(f"Fetching fundamentals for {yf_ticker} (market={market})")
 
         stock = yf.Ticker(yf_ticker)
-        info = stock.info
+        info = _load_yfinance_info(stock)
+        fast_info = getattr(stock, "fast_info", {}) or {}
 
         # Guard against empty info (invalid ticker)
-        if not info or info.get("regularMarketPrice") is None and info.get("currentPrice") is None:
-            # Try to get at least some data
-            if not info.get("shortName") and not info.get("longName"):
-                return {"error": f"Ticker '{ticker}' not found. Please check the symbol."}
+        if (
+            not info
+            and not fast_info
+        ) or (
+            not info.get("shortName")
+            and not info.get("longName")
+            and fast_info.get("last_price") is None
+        ):
+            return {"error": f"Ticker '{ticker}' not found. Please check the symbol."}
 
         name = safe_get(info, "longName") or safe_get(info, "shortName") or yf_ticker
 
         # Currency symbol
         currency = "₹" if market == "India" else "$"
-        current_price = safe_get(info, "currentPrice") or safe_get(info, "regularMarketPrice")
+        current_price = (
+            safe_get(info, "currentPrice")
+            or safe_get(info, "regularMarketPrice")
+            or fast_info.get("last_price")
+        )
 
         fundamentals = {
             "ticker":           yf_ticker,
@@ -129,8 +160,8 @@ def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
             "current_price":    current_price,
             "pe_ratio":         safe_get(info, "trailingPE"),
             "forward_pe":       safe_get(info, "forwardPE"),
-            "market_cap":       format_market_cap(safe_get(info, "marketCap"), market),
-            "market_cap_raw":   safe_get(info, "marketCap"),
+            "market_cap":       format_market_cap(safe_get(info, "marketCap") or fast_info.get("market_cap"), market),
+            "market_cap_raw":   safe_get(info, "marketCap") or fast_info.get("market_cap"),
             "week_52_high":     safe_get(info, "fiftyTwoWeekHigh"),
             "week_52_low":      safe_get(info, "fiftyTwoWeekLow"),
             "dividend_yield":   safe_get(info, "dividendYield"),
@@ -147,7 +178,7 @@ def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
             "description":      safe_get(info, "longBusinessSummary", ""),
             "website":          safe_get(info, "website", ""),
             "employees":        safe_get(info, "fullTimeEmployees"),
-            "exchange":         safe_get(info, "exchange", ""),
+            "exchange":         safe_get(info, "exchange", "") or fast_info.get("exchange", ""),
             "error":            None,
         }
         return fundamentals

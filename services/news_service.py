@@ -92,7 +92,6 @@ TITLE_TIME_WINDOW: int = 300  # 5 minutes
 
 # Source quality baseline (0.0-1.0)
 SOURCE_QUALITY_BASELINE: Dict[str, float] = {
-    "Reuters":              1.0,
     "Bloomberg":            1.0,
     "Financial Times":      1.0,
     "Wall Street Journal":  0.95,
@@ -121,7 +120,6 @@ INDIA_RSS_FEEDS: Dict[str, str] = {
 }
 
 GLOBAL_RSS_FEEDS: Dict[str, str] = {
-    "Reuters":       "https://www.reutersagency.com/feed/",
     "CNBC":          "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147",
     "WSJ":           "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
     "MarketWatch":   "https://feeds.content.dowjones.io/public/rss/mw_marketpulse",
@@ -506,8 +504,9 @@ def _parse_rss(
     aliases = COMPANY_ALIASES.get(bare_ticker, [])
     exact_terms.extend(alias.upper() for alias in aliases)
 
-    # Sector mapping for Indian stocks (smart filtering)
+    # Sector mapping for Indian and major US stocks (smart filtering)
     SECTOR_KEYWORDS = {
+        # Indian stocks
         "WIPRO": ["IT", "TECHNOLOGY", "SOFTWARE", "TECH", "INFOSYS", "TCS", "HCL"],
         "TCS": ["IT", "TECHNOLOGY", "SOFTWARE", "TECH", "WIPRO", "INFOSYS", "HCL"],
         "INFY": ["IT", "TECHNOLOGY", "SOFTWARE", "TECH", "WIPRO", "TCS", "HCL"],
@@ -517,6 +516,18 @@ def _parse_rss(
         "SBIN": ["BANKING", "BANK", "FINANCE", "LOAN", "INTEREST", "RBI", "PSU"],
         "TATAMOTORS": ["AUTO", "AUTOMOBILE", "CAR", "EV", "ELECTRIC", "VEHICLE"],
         "MARUTI": ["AUTO", "AUTOMOBILE", "CAR", "EV", "ELECTRIC", "VEHICLE"],
+        
+        # Major US stocks
+        "AAPL": ["TECH", "TECHNOLOGY", "IPHONE", "IPAD", "MACBOOK", "APPLE", "SOFTWARE", "CONSUMER"],
+        "MSFT": ["TECH", "TECHNOLOGY", "SOFTWARE", "WINDOWS", "AZURE", "OFFICE", "CLOUD", "AI"],
+        "GOOGL": ["TECH", "TECHNOLOGY", "SEARCH", "ANDROID", "YOUTUBE", "GOOGLE", "AI"],
+        "AMZN": ["E-COMMERCE", "RETAIL", "CLOUD", "AWS", "ALEXA", "PRIME", "ONLINE"],
+        "TSLA": ["AUTO", "ELECTRIC", "EV", "TESLA", "VEHICLE", "BATTERY", "MUSK"],
+        "NVDA": ["TECH", "SEMICONDUCTOR", "GPU", "AI", "GRAPHICS", "CHIP", "NVIDIA"],
+        "META": ["TECH", "SOCIAL", "FACEBOOK", "INSTAGRAM", "WHATSAPP", "META", "AI"],
+        "NFLX": ["STREAMING", "ENTERTAINMENT", "NETFLIX", "MEDIA", "CONTENT"],
+        "AMD": ["SEMICONDUCTOR", "CHIP", "PROCESSOR", "TECH", "COMPUTING"],
+        "INTC": ["SEMICONDUCTOR", "CHIP", "INTEL", "PROCESSOR", "COMPUTING"],
     }
 
     # Get sector keywords for this stock
@@ -556,10 +567,16 @@ def _parse_rss(
                 sector_match = any(keyword.lower() in combined for keyword in sector_keywords)
 
                 # For Indian stocks, also keep major market news if stock is heavyweight
-                is_heavyweight = bare_ticker in ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN"]
-                market_mention = "nifty" in combined or "sensex" in combined
+                is_heavyweight_india = bare_ticker in ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN"]
+                market_mention_india = "nifty" in combined or "sensex" in combined
+                
+                # For major US stocks, also keep sector news and major market news
+                is_heavyweight_us = bare_ticker in ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META"]
+                market_mention_us = any(term in combined for term in ["dow", "s&p", "nasdaq", "stock market", "wall street"])
+                
+                sector_or_market_match = sector_match or (is_heavyweight_india and market_mention_india) or (is_heavyweight_us and market_mention_us)
 
-                if not (exact_match or sector_match or (is_heavyweight and market_mention)):
+                if not (exact_match or sector_or_market_match):
                     continue
 
         # Extract source from item
@@ -1062,7 +1079,7 @@ def fetch_global_news_rss(
     with ThreadPoolExecutor(max_workers=len(GLOBAL_RSS_FEEDS)) as pool:
         futures = {
             pool.submit(_parse_rss, url, ticker, company_name,
-                        "Global", name, per_feed, True): name
+                        "Global", name, per_feed, True, False): name  # strict_mode=False for sector matching
             for name, url in GLOBAL_RSS_FEEDS.items()
         }
         for fut in as_completed(futures, timeout=PARALLEL_TIMEOUT):
