@@ -18,23 +18,46 @@ Run:  streamlit run app.py
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import logging
 import math
 import os
 import sys
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, os.path.dirname(__file__))
+root_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(root_dir))
 
 import html
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from pathlib import Path
 from plotly.subplots import make_subplots
 
-import services.portfolio_db as portfolio_db
+
+def _load_service_module(module_name: str):
+    try:
+        return importlib.import_module(module_name)
+    except Exception as exc:
+        logging.warning(f"Standard import failed for {module_name}: {exc}")
+        path = root_dir / "services" / f"{module_name.split('.')[-1]}.py"
+        if not path.exists():
+            raise
+        spec = importlib.util.spec_from_file_location(module_name, str(path))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not create import spec for {module_name}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+portfolio_db = _load_service_module("services.portfolio_db")
+search_services = _load_service_module("services.search_services")
+stock_service = _load_service_module("services.stock_service")
+news_service = _load_service_module("services.news_service")
 
 DB_PATH = Path(portfolio_db.DB_PATH)
 add_stock = portfolio_db.add_stock
@@ -45,18 +68,17 @@ remove_stock = portfolio_db.remove_stock
 ticker_exists = portfolio_db.ticker_exists
 update_company_name = portfolio_db.update_company_name
 
-from services.search_services import (
-    SearchResult,
-    resolve_with_fallback,
-    search_company,
-)
-from services.stock_service import (
-    compute_technical_indicators,
-    detect_market,
-    fetch_fundamentals,
-    fetch_price_history,
-)
-from services.news_service import fetch_news, get_api_key_status
+SearchResult = search_services.SearchResult
+resolve_with_fallback = search_services.resolve_with_fallback
+search_company = search_services.search_company
+
+compute_technical_indicators = stock_service.compute_technical_indicators
+detect_market = stock_service.detect_market
+fetch_fundamentals = stock_service.fetch_fundamentals
+fetch_price_history = stock_service.fetch_price_history
+
+fetch_news = news_service.fetch_news
+get_api_key_status = news_service.get_api_key_status
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
