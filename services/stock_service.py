@@ -10,6 +10,7 @@ Market detection logic:
 """
 
 import logging
+from functools import lru_cache
 from typing import Dict, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
@@ -108,6 +109,42 @@ def _load_yfinance_info(stock) -> Dict[str, Any]:
     return info or {}
 
 
+def _load_yfinance_fast_info(stock) -> Dict[str, Any]:
+    """Safely read yfinance fast_info metadata."""
+    fast_info = {}
+    if hasattr(stock, "fast_info"):
+        try:
+            fast_info = getattr(stock, "fast_info") or {}
+        except Exception as e:
+            logger.warning(f"yfinance stock.fast_info access failed: {e}")
+            fast_info = {}
+    return fast_info or {}
+
+
+def _fetch_last_price(stock, info: Dict[str, Any], fast_info: Dict[str, Any]) -> Any:
+    """Try multiple yfinance sources to determine the last available price."""
+    price = (
+        safe_get(info, "currentPrice")
+        or safe_get(info, "regularMarketPrice")
+        or safe_get(info, "previousClose")
+        or safe_get(info, "regularMarketPreviousClose")
+        or fast_info.get("last_price")
+    )
+
+    if price is not None:
+        return price
+
+    try:
+        hist = stock.history(period="1d", interval="1m")
+        if not hist.empty and "Close" in hist.columns:
+            return hist["Close"].dropna().iloc[-1]
+    except Exception as e:
+        logger.warning(f"yfinance history fallback failed: {e}")
+
+    return None
+
+
+@lru_cache(maxsize=128)
 def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
     """
     Fetch stock fundamentals using yfinance.
@@ -126,7 +163,7 @@ def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
 
         stock = yf.Ticker(yf_ticker)
         info = _load_yfinance_info(stock)
-        fast_info = getattr(stock, "fast_info", {}) or {}
+        fast_info = _load_yfinance_fast_info(stock)
 
         # Guard against empty info (invalid ticker)
         if (
@@ -143,11 +180,7 @@ def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
 
         # Currency symbol
         currency = "₹" if market == "India" else "$"
-        current_price = (
-            safe_get(info, "currentPrice")
-            or safe_get(info, "regularMarketPrice")
-            or fast_info.get("last_price")
-        )
+        current_price = _fetch_last_price(stock, info, fast_info)
 
         fundamentals = {
             "ticker":           yf_ticker,

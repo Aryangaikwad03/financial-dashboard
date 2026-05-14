@@ -298,7 +298,7 @@ def _is_within_max_age(pub_epoch: Optional[int]) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _add_stock_from_result(symbol: str, company_name: str, market: str,
-                           container=None) -> bool:
+                           container=None, fundamentals: dict | None = None) -> bool:
     """
     Final validation + DB insert for a stock that has already been resolved.
     Displays feedback in `container` (defaults to st.sidebar).
@@ -316,7 +316,7 @@ def _add_stock_from_result(symbol: str, company_name: str, market: str,
 
     with out:
         with st.spinner(f"Validating {symbol}…"):
-            data = fetch_fundamentals(symbol)
+            data = fundamentals if fundamentals is not None else fetch_fundamentals(symbol)
 
     if data.get("error"):
         error_message = data.get("error")
@@ -375,6 +375,7 @@ def _add_stock_by_raw_input(raw: str, container=None) -> bool:
                 data.get("company_name", yf_ticker),
                 market,
                 out,
+                fundamentals=data,
             )
         # Ticker lookup failed → fall through to name search
 
