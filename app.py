@@ -1,25 +1,17 @@
 """
-app.py — Financial Dashboard (v3)
+app.py — Financial Dashboard (v3.1)
 ==================================
 Layout
 ──────
 Sidebar   │  Smart search (live suggestions) + portfolio list
 Main area │  Tabs: Overview | Technical Analysis | News Feed
 
-Key improvements over v2
+Key improvements over v3
 ────────────────────────
-• Unified smart search bar: accepts BOTH ticker symbols AND company names
-  - Shows live dropdown suggestions as you type (≥2 chars)
-  - Detects whether input is a ticker or a company name automatically
-  - No more "try adding .NS suffix" confusion for Indian stocks
-  - FMP → Yahoo Finance fallback for suggestions
-• News feed hard-filtered to last 30 days (configurable via NEWS_MAX_AGE_DAYS)
-• News feed shows article age in colour (green=fresh, amber=ageing, red=old)
-• Stale cache for news is cleared automatically if the cached batch would be
-  entirely older than NEWS_MAX_AGE_DAYS
-• Search state is properly isolated so typing doesn't accidentally re-select
-• All search/add UX consolidated to one clean component
-• Quick-add buttons still available on welcome screen
+• Portfolio reset functionality for troubleshooting
+• Enhanced error diagnostics for stock addition failures
+• Robust yfinance fundamentals lookup with fallbacks
+• Absolute database path for deployment compatibility
 
 Run:  streamlit run app.py
 """
