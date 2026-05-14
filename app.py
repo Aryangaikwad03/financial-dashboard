@@ -42,8 +42,14 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from services.portfolio_db import (
-    add_stock, get_portfolio, init_db,
-    remove_stock, ticker_exists, update_company_name,
+    DB_PATH,
+    add_stock,
+    clear_portfolio,
+    get_portfolio,
+    init_db,
+    remove_stock,
+    ticker_exists,
+    update_company_name,
 )
 from services.search_services import (
     SearchResult,
@@ -319,9 +325,9 @@ def _add_stock_from_result(symbol: str, company_name: str, market: str,
             data = fetch_fundamentals(symbol)
 
     if data.get("error"):
+        error_message = data.get("error")
         out.error(
-            f"❌ Could not load data for **{symbol}**. "
-            "The ticker may be delisted or unavailable via yfinance."
+            f"❌ Could not load data for **{symbol}**. {error_message}"
         )
         return False
 
@@ -488,6 +494,21 @@ def render_sidebar() -> None:
                     _render_portfolio_row(stock)
 
         st.markdown("---")
+        with st.expander("Portfolio diagnostics and reset"):
+            st.write("**Database file path**")
+            st.code(str(DB_PATH))
+            if DB_PATH.exists():
+                st.success("Portfolio database exists in the deployed container.")
+            else:
+                st.warning("Portfolio database file is not present yet; it will be created on first write.")
+
+            if st.button("Clear portfolio and reset database", key="reset_portfolio"):
+                if clear_portfolio():
+                    st.success("Portfolio cleared. Refreshing the dashboard…")
+                else:
+                    st.error("Could not clear portfolio database. Check logs for details.")
+                st.rerun()
+
         st.caption(
             "Data: yfinance · News: multi-source parallel\n"
             "Prices delayed ~15 min"

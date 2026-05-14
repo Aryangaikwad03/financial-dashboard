@@ -105,6 +105,26 @@ def remove_stock(ticker: str) -> bool:
         conn.close()
 
 
+def clear_portfolio() -> bool:
+    """
+    Remove all stocks from the portfolio and keep the database schema intact.
+
+    Returns:
+        True on success, False on error.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM portfolio")
+        conn.commit()
+        logger.info("Cleared the portfolio database.")
+        return True
+    except sqlite3.Error as e:
+        logger.error(f"Error clearing portfolio: {e}")
+        return False
+    finally:
+        conn.close()
+
+
 def get_portfolio() -> List[Dict]:
     """
     Retrieve all stocks in the portfolio, ordered by market then ticker.
