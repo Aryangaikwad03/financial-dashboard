@@ -33,16 +33,17 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from services.portfolio_db import (
-    DB_PATH,
-    add_stock,
-    clear_portfolio,
-    get_portfolio,
-    init_db,
-    remove_stock,
-    ticker_exists,
-    update_company_name,
-)
+import services.portfolio_db as portfolio_db
+
+DB_PATH = portfolio_db.DB_PATH
+add_stock = portfolio_db.add_stock
+clear_portfolio = getattr(portfolio_db, "clear_portfolio", None)
+get_portfolio = portfolio_db.get_portfolio
+init_db = portfolio_db.init_db
+remove_stock = portfolio_db.remove_stock
+ticker_exists = portfolio_db.ticker_exists
+update_company_name = portfolio_db.update_company_name
+
 from services.search_services import (
     SearchResult,
     resolve_with_fallback,
@@ -494,7 +495,9 @@ def render_sidebar() -> None:
             else:
                 st.warning("Portfolio database file is not present yet; it will be created on first write.")
 
-            if st.button("Clear portfolio and reset database", key="reset_portfolio"):
+            if clear_portfolio is None:
+                st.warning("Reset feature is unavailable in this deployment until the latest code is loaded.")
+            elif st.button("Clear portfolio and reset database", key="reset_portfolio"):
                 if clear_portfolio():
                     st.success("Portfolio cleared. Refreshing the dashboard…")
                 else:
