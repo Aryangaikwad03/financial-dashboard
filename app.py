@@ -31,6 +31,9 @@ from typing import Optional
 root_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(root_dir))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import html
 import pandas as pd
 import plotly.graph_objects as go
@@ -58,6 +61,7 @@ portfolio_db = _load_service_module("services.portfolio_db")
 search_services = _load_service_module("services.search_services")
 stock_service = _load_service_module("services.stock_service")
 news_service = _load_service_module("services.news_service")
+screener_service = _load_service_module("services.screener_service")
 
 DB_PATH = Path(portfolio_db.DB_PATH)
 add_stock = portfolio_db.add_stock
@@ -680,33 +684,57 @@ def render_technical_analysis(ticker: str, market: str) -> None:
     df       = compute_technical_indicators(df_raw)
     currency = "₹" if market == "India" else "$"
 
-    # ── Candlestick + SMAs + Bollinger Bands ──────────────────────────────────
+    # ── Chart Controls ────────────────────────────────────────────────────────
+    col1, col2 = st.columns(2)
+    with col1:
+        chart_type = st.radio("Chart Type", ["Line", "Candlestick"], horizontal=True, key=f"chart_type_{ticker}")
+    with col2:
+        indicators = st.multiselect(
+            "Indicators",
+            ["SMA 20", "SMA 50", "Bollinger Bands"],
+            default=[],
+            key=f"indicators_{ticker}"
+        )
+
+    # ── Chart Construction ────────────────────────────────────────────────────
     fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df["Open"], high=df["High"],
-        low=df["Low"],   close=df["Close"],
-        name="Price",
-        increasing_line_color="#26a69a",
-        decreasing_line_color="#ef5350",
-    ))
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["SMA_20"], name="SMA 20",
-        line=dict(color="#ff9800", width=1.5, dash="dot"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["SMA_50"], name="SMA 50",
-        line=dict(color="#2196f3", width=1.5, dash="dot"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["BB_Upper"], name="BB Upper",
-        line=dict(color="rgba(150,150,255,0.4)", width=1), showlegend=False,
-    ))
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["BB_Lower"], name="Bollinger Bands",
-        line=dict(color="rgba(150,150,255,0.4)", width=1),
-        fill="tonexty", fillcolor="rgba(150,150,255,0.07)",
-    ))
+    
+    if chart_type == "Candlestick":
+        fig.add_trace(go.Candlestick(
+            x=df.index,
+            open=df["Open"], high=df["High"],
+            low=df["Low"],   close=df["Close"],
+            name="Price",
+            increasing_line_color="#26a69a",
+            decreasing_line_color="#ef5350",
+        ))
+    else:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["Close"], name="Price",
+            line=dict(color="#2196f3", width=2),
+        ))
+
+    if "SMA 20" in indicators:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["SMA_20"], name="SMA 20",
+            line=dict(color="#ff9800", width=1.5, dash="dot"),
+        ))
+    if "SMA 50" in indicators:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["SMA_50"], name="SMA 50",
+            line=dict(color="#ab47bc", width=1.5, dash="dot"),
+        ))
+    if "Bollinger Bands" in indicators:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["BB_Upper"], name="BB Upper",
+            line=dict(color="rgba(150,150,255,0.4)", width=1), showlegend=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["BB_Lower"], name="Bollinger Bands",
+            line=dict(color="rgba(150,150,255,0.4)", width=1),
+            fill="tonexty", fillcolor="rgba(150,150,255,0.07)",
+        ))
+
     fig.update_layout(
         title=f"{ticker} — Price Chart ({period_label})",
         yaxis_title=f"Price ({currency})", xaxis_title="",
@@ -902,50 +930,121 @@ def render_news_feed(ticker: str, company_name: str,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def render_welcome() -> None:
-    st.markdown("""
-    ## 👋 Welcome to the Financial Dashboard
+    st.markdown("## 📊 Industry & Sector Explorer")
+    st.markdown("Wipe out the old landing text. Search and filter companies in India and US/Global markets dynamically.")
+    
+    # ── Screener Controls ─────────────────────────────────────────────────────
+    col1, col2 = st.columns(2)
+    with col1:
+        market_sel = st.selectbox("Market Region", ["India", "US / Global"], index=0, key="scr_market")
+        market_code = "india" if market_sel == "India" else "america"
+        
+    with col2:
+        sectors = screener_service.get_sectors()
+        sector_sel = st.selectbox("Select Sector", sectors, index=0, key="scr_sector")
+        
+    # Get sub-industries dynamically
+    industries = ["All Industries"] + screener_service.get_industries(sector_sel, market_code)
+    industry_sel = st.selectbox("Select Sub-Industry", industries, index=0, key="scr_industry")
+    
+    st.markdown("---")
+    
+    # Cache screener data fetching to make local filtering fast and responsive
+    @st.cache_data(show_spinner=False, ttl=300)
+    def _fetch_screener_data(sect: str, ind: str, mkt: str) -> pd.DataFrame:
+        return screener_service.get_top_companies(sect, ind if ind != "All Industries" else None, mkt, limit=50)
 
-    Track US and Indian stocks with live news, fundamentals, and technical charts.
+    with st.spinner("Fetching screener data from TradingView..."):
+        df = _fetch_screener_data(sector_sel, industry_sel, market_code)
+        
+    if df.empty:
+        st.warning("No companies found for the selected sector and industry.")
+        return
+        
+    # ── Filtering Controls ────────────────────────────────────────────────────
+    st.markdown("### 🔍 Filters")
+    f_col1, f_col2 = st.columns(2)
+    
+    # 1. Name/Ticker search
+    with f_col1:
+        name_filter = st.text_input("Filter by Name or Ticker", "", placeholder="e.g. Infosys / AAPL")
+        
+    # Apply name filter
+    if name_filter:
+        df = df[
+            df["Company Name"].str.contains(name_filter, case=False) |
+            df["Ticker"].str.contains(name_filter, case=False)
+        ]
+        
+    # 2. Market Cap Slider
+    with f_col2:
+        if not df.empty and len(df) > 1:
+            min_mc = float(df["Market Cap"].min())
+            max_mc = float(df["Market Cap"].max())
+            if min_mc < max_mc:
+                mc_range = st.slider(
+                    "Filter by Market Cap",
+                    min_value=min_mc,
+                    max_value=max_mc,
+                    value=(min_mc, max_mc)
+                )
+                df = df[(df["Market Cap"] >= mc_range[0]) & (df["Market Cap"] <= mc_range[1])]
 
-    ### Getting Started
-    1. **Type** a ticker symbol **or company name** in the search bar on the left
-    2. Pick from the live suggestions that appear, or hit **Search & Add**
-    3. Click any stock in your portfolio to open its detail view
-
-    ### Supported Markets
-    | Market | Examples |
-    |--------|---------|
-    | 🇺🇸 US (NYSE / NASDAQ) | AAPL, MSFT, GOOGL, TSLA, NVDA |
-    | 🇮🇳 India (NSE / BSE)  | RELIANCE, TCS, HDFCBANK, INFY, WIPRO |
-
-    ### Features at a glance
-    - 🔍 **Smart search** — type a name *or* ticker; live suggestions from FMP + Yahoo Finance
-    - 📊 **Fundamentals** — P/E, Market Cap, 52w range, ROE, Beta, Margins, Health ratios
-    - 📈 **Technical Analysis** — Candlestick + SMA-20/50 + Bollinger Bands + RSI + MACD
-    - 📰 **News Feed** — Parallel multi-source aggregation, deduplicated, last 30 days only
-    - 💾 **Portfolio** — Saved locally in SQLite; persists across sessions
-
-    ---
-    """)
-
-    # Quick-add popular stocks
-    st.markdown("#### ⚡ Quick Add")
-    quick_us    = ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA"]
-    quick_india = ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK"]
-
-    cols_us = st.columns(5)
-    for i, t in enumerate(quick_us):
-        with cols_us[i]:
-            if st.button(f"🇺🇸 {t}", key=f"q_{t}"):
-                if _add_stock_by_raw_input(t):
-                    st.rerun()
-
-    cols_in = st.columns(5)
-    for i, t in enumerate(quick_india):
-        with cols_in[i]:
-            if st.button(f"🇮🇳 {t}", key=f"q_{t}"):
-                if _add_stock_by_raw_input(t):
-                    st.rerun()
+    # ── Display Table ─────────────────────────────────────────────────────────
+    st.markdown(f"### 📈 Results ({len(df)} companies)")
+    
+    if df.empty:
+        st.info("No companies match your filters.")
+        return
+        
+    # Render table header
+    h_col1, h_col2, h_col3, h_col4, h_col5 = st.columns([1.5, 3, 2.5, 1.5, 1.5])
+    with h_col1: st.write("**Ticker**")
+    with h_col2: st.write("**Company Name**")
+    with h_col3: st.write("**Market Cap**")
+    with h_col4: st.write("**Price**")
+    with h_col5: st.write("**Action**")
+    
+    # Render table rows
+    for idx, row in df.iterrows():
+        r_col1, r_col2, r_col3, r_col4, r_col5 = st.columns([1.5, 3, 2.5, 1.5, 1.5])
+        
+        tv_ticker = row["Symbol"]
+        ticker = row["Ticker"]
+        name = row["Company Name"]
+        mc = row["Market Cap"]
+        price = row["Price"]
+        
+        # Convert TradingView ticker format to yfinance
+        yf_ticker = tv_ticker
+        if ":" in tv_ticker:
+            exch, tk = tv_ticker.split(":", 1)
+            if exch in ["NSE", "BSE"]:
+                yf_ticker = f"{tk}.NS" if exch == "NSE" else f"{tk}.BO"
+            else:
+                yf_ticker = tk
+                
+        # Format values
+        market_label = "India" if market_code == "india" else "US"
+        formatted_mc = stock_service.format_market_cap(mc, market_label)
+        formatted_price = f"₹{price:,.2f}" if market_label == "India" else f"${price:,.2f}"
+        
+        with r_col1:
+            st.write(f"`{yf_ticker}`")
+        with r_col2:
+            st.write(name)
+        with r_col3:
+            st.write(formatted_mc)
+        with r_col4:
+            st.write(formatted_price)
+        with r_col5:
+            # Check if ticker is already in portfolio
+            if ticker_exists(yf_ticker):
+                st.write("✔️ Added")
+            else:
+                if st.button("＋ Port", key=f"scr_add_{yf_ticker}_{idx}"):
+                    if _add_stock_from_result(yf_ticker, name, market_label):
+                        st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
