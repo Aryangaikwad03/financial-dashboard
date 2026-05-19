@@ -80,6 +80,7 @@ compute_technical_indicators = stock_service.compute_technical_indicators
 detect_market = stock_service.detect_market
 fetch_fundamentals = stock_service.fetch_fundamentals
 fetch_price_history = stock_service.fetch_price_history
+fetch_financial_trends = stock_service.fetch_financial_trends
 
 fetch_news = news_service.fetch_news
 get_api_key_status = news_service.get_api_key_status
@@ -657,6 +658,129 @@ def render_fundamentals(data: dict) -> None:
             st.write(desc)
 
 
+@st.cache_data(show_spinner=False, ttl=86400)
+def cached_financial_trends(ticker: str) -> dict:
+    return fetch_financial_trends(ticker)
+
+
+def render_financial_trends(ticker: str, market: str) -> None:
+    st.markdown("### 📊 YoY Financials & Cash Flow Trends")
+    st.markdown("View key income and cash flow metrics over the last 4-5 years.")
+
+    with st.spinner("Fetching financial statements…"):
+        data = cached_financial_trends(ticker)
+        
+    if "error" in data:
+        st.error(f"⚠️ Could not load financial statements: {data['error']}")
+        return
+        
+    years = data["years"]
+    if not years:
+        st.warning("No annual financial data available.")
+        return
+
+    market_label = "India" if market == "India" else "US"
+    currency = "₹" if market_label == "India" else "$"
+    
+    # ── Financial Tables ──────────────────────────────────────────────────────
+    def format_val(val):
+        if val is None:
+            return "N/A"
+        if market_label == "India":
+            return f"{currency}{val / 1e7:,.2f} Cr"
+        else:
+            if abs(val) >= 1e9:
+                return f"{currency}{val / 1e9:,.2f} B"
+            elif abs(val) >= 1e6:
+                return f"{currency}{val / 1e6:,.2f} M"
+            else:
+                return f"{currency}{val:,.2f}"
+
+    raw_table_data = {
+        "Metric": [
+            "Total Revenue",
+            "EBITDA",
+            "PAT (Net Income)",
+            "Operating Cash Flow",
+            "Investing Cash Flow",
+            "Financing Cash Flow"
+        ]
+    }
+    
+    for i, year in enumerate(years):
+        raw_table_data[year] = [
+            format_val(data["revenue"][i]),
+            format_val(data["ebitda"][i]),
+            format_val(data["pat"][i]),
+            format_val(data["operating_cf"][i]),
+            format_val(data["investing_cf"][i]),
+            format_val(data["financing_cf"][i])
+        ]
+        
+    df_table = pd.DataFrame(raw_table_data)
+    st.dataframe(df_table, use_container_width=True, hide_index=True)
+    
+    # ── Charts ────────────────────────────────────────────────────────────────
+    st.markdown("#### 📈 Profitability Trends")
+    fig_profit = go.Figure()
+    
+    if any(x is not None for x in data["revenue"]):
+        fig_profit.add_trace(go.Scatter(
+            x=years, y=data["revenue"], name="Total Revenue",
+            mode="lines+markers", line=dict(width=3, color="#1f77b4")
+        ))
+    if any(x is not None for x in data["ebitda"]):
+        fig_profit.add_trace(go.Scatter(
+            x=years, y=data["ebitda"], name="EBITDA",
+            mode="lines+markers", line=dict(width=3, color="#ff7f0e")
+        ))
+    if any(x is not None for x in data["pat"]):
+        fig_profit.add_trace(go.Scatter(
+            x=years, y=data["pat"], name="PAT (Net Income)",
+            mode="lines+markers", line=dict(width=3, color="#2ca02c")
+        ))
+        
+    fig_profit.update_layout(
+        xaxis_title="Fiscal Year",
+        yaxis_title=f"Amount ({currency})",
+        hovermode="x unified",
+        margin=dict(l=20, r=20, t=20, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig_profit, use_container_width=True)
+
+    st.markdown("#### 💸 Cash Flow Trends")
+    fig_cf = go.Figure()
+    if any(x is not None for x in data["operating_cf"]):
+        fig_cf.add_trace(go.Scatter(
+            x=years, y=data["operating_cf"], name="Operating CF",
+            mode="lines+markers", line=dict(width=3, color="#2ca02c")
+        ))
+    if any(x is not None for x in data["investing_cf"]):
+        fig_cf.add_trace(go.Scatter(
+            x=years, y=data["investing_cf"], name="Investing CF",
+            mode="lines+markers", line=dict(width=3, color="#d62728")
+        ))
+    if any(x is not None for x in data["financing_cf"]):
+        fig_cf.add_trace(go.Scatter(
+            x=years, y=data["financing_cf"], name="Financing CF",
+            mode="lines+markers", line=dict(width=3, color="#9467bd")
+        ))
+        
+    fig_cf.update_layout(
+        xaxis_title="Fiscal Year",
+        yaxis_title=f"Amount ({currency})",
+        hovermode="x unified",
+        margin=dict(l=20, r=20, t=20, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig_cf, use_container_width=True)
+
+    if st.button("🔄 Refresh Financials", key="ref_fin"):
+        cached_financial_trends.clear()
+        st.rerun()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Technical Analysis tab
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1068,11 +1192,12 @@ def main() -> None:
     market    = st.session_state.selected_market
     name      = st.session_state.selected_name or ticker
 
-    # Three tabs
-    tab_ov, tab_ta, tab_news = st.tabs([
+    # Four tabs
+    tab_ov, tab_ta, tab_news, tab_fin = st.tabs([
         "📋 Overview & Fundamentals",
         "📈 Technical Analysis",
         "📰 News Feed",
+        "📊 Financials & Trends",
     ])
 
     with tab_ov:
@@ -1101,6 +1226,9 @@ def main() -> None:
         if st.button("🔄 Refresh News", key="ref_news"):
             cached_news.clear()
             st.rerun()
+
+    with tab_fin:
+        render_financial_trends(ticker, market)
 
 
 if __name__ == "__main__":

@@ -292,3 +292,71 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["BB_Lower"] = df["SMA_20"] - 2 * std20
 
     return df
+
+
+def fetch_financial_trends(ticker: str) -> dict:
+    """
+    Fetch YoY income statement and cash flow data for the last 4-5 years.
+    Returns:
+        dict containing 'years' list and lists of metrics or error messages.
+    """
+    try:
+        import yfinance as yf
+        yf_ticker, _ = detect_market(ticker)
+        t = yf.Ticker(yf_ticker)
+        
+        income = t.income_stmt
+        cash_flow = t.cash_flow
+        
+        if income.empty or cash_flow.empty:
+            return {"error": "No annual financial statements found."}
+            
+        cols = income.columns
+        years = []
+        for col in cols:
+            if hasattr(col, "year"):
+                years.append(str(col.year))
+            else:
+                years.append(str(col).split("-")[0])
+                
+        def get_row_data(df, keys):
+            for key in keys:
+                if key in df.index:
+                    row = df.loc[key]
+                    if isinstance(row, pd.Series):
+                        return [None if pd.isna(x) else float(x) for x in row.values]
+                    else:
+                        val = row.values[0] if hasattr(row, "values") else row
+                        return [float(val)] * len(cols)
+            return [None] * len(cols)
+            
+        revenue = get_row_data(income, ["Total Revenue", "Gross Revenue"])
+        ebitda = get_row_data(income, ["EBITDA"])
+        pat = get_row_data(income, ["Net Income", "Net Income Common Stockholders"])
+        
+        operating_cf = get_row_data(cash_flow, ["Operating Cash Flow", "Cash Flow From Operating Activities"])
+        investing_cf = get_row_data(cash_flow, ["Investing Cash Flow", "Cash Flow From Investing Activities"])
+        financing_cf = get_row_data(cash_flow, ["Financing Cash Flow", "Cash Flow From Financing Activities"])
+        
+        # Reverse to oldest -> newest
+        years.reverse()
+        revenue.reverse()
+        ebitda.reverse()
+        pat.reverse()
+        operating_cf.reverse()
+        investing_cf.reverse()
+        financing_cf.reverse()
+        
+        return {
+            "years": years,
+            "revenue": revenue,
+            "ebitda": ebitda,
+            "pat": pat,
+            "operating_cf": operating_cf,
+            "investing_cf": investing_cf,
+            "financing_cf": financing_cf
+        }
+    except Exception as e:
+        logger.error(f"Error fetching financial trends for {ticker}: {e}")
+        return {"error": str(e)}
+
