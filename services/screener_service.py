@@ -84,15 +84,18 @@ def get_top_companies(
         limit: Number of results to return
         
     Returns:
-        DataFrame with columns: ticker, name, description, market_cap_basic, close, volume
+        DataFrame with columns: Symbol, Ticker, Company Name, Market Cap, Price, Volume
     """
     try:
+        # Fetch more than the limit for India to account for BSE/NSE duplicates
+        fetch_limit = int(limit * 2.5) if market == 'india' else limit
+        
         q = (Query()
              .select('name', 'description', 'market_cap_basic', 'close', 'volume')
              .set_markets(market)
              .where(Column('sector') == sector)
              .order_by('market_cap_basic', ascending=False)
-             .limit(limit)
+             .limit(fetch_limit)
         )
         
         if industry and industry != "All Industries":
@@ -112,6 +115,19 @@ def get_top_companies(
             'close': 'Price',
             'volume': 'Volume'
         })
+        
+        # De-duplicate: Prioritize NSE over BSE listings for Indian market
+        if market == 'india':
+            df['is_nse'] = df['Symbol'].str.startswith('NSE:')
+            df = df.sort_values(by='is_nse', ascending=False)
+            df = df.drop_duplicates(subset=['Ticker'], keep='first')
+            df = df.drop(columns=['is_nse'])
+            df = df.sort_values(by='Market Cap', ascending=False)
+        else:
+            df = df.drop_duplicates(subset=['Ticker'], keep='first')
+            
+        # Slice to the requested limit
+        df = df.head(limit)
         
         return df
     except Exception as e:
