@@ -210,15 +210,15 @@ def _init_session_state() -> None:
 # Cached data fetchers
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=3_600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def cached_fundamentals(ticker: str) -> dict:
-    """1-hour cache for stock fundamentals."""
+    """5-minute cache for stock fundamentals."""
     return fetch_fundamentals(ticker)
 
 
-@st.cache_data(ttl=3_600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def cached_price_history(ticker: str, period: str) -> pd.DataFrame | None:
-    """1-hour cache for OHLCV data."""
+    """5-minute cache for OHLCV data."""
     return fetch_price_history(ticker, period)
 
 
@@ -336,6 +336,20 @@ def _add_stock_from_result(symbol: str, company_name: str, market: str,
     # Fix any accidental double suffixes that might survive from search APIs
     for bad, good in [(".BO.NS", ".NS"), (".NS.BO", ".BO")]:
         symbol = symbol.replace(bad, good)
+
+    # ── FORCE NSE PREFERENCE ──
+    # Yahoo Finance data for BSE (.BO) is often stale/standalone compared to NSE (.NS).
+    # If the user tries to add a .BO stock, proactively check if a .NS version exists.
+    if symbol.endswith(".BO"):
+        test_ns_symbol = symbol.replace(".BO", ".NS")
+        with out:
+            with st.spinner(f"Checking NSE listing for {company_name}…"):
+                ns_data = fetch_fundamentals(test_ns_symbol)
+        
+        # If the .NS listing is valid (no error), quietly swap to it!
+        if not ns_data.get("error"):
+            symbol = test_ns_symbol
+            fundamentals = ns_data
 
     if ticker_exists(symbol):
         out.warning(f"**{company_name}** ({symbol}) is already in your portfolio.")
@@ -707,36 +721,55 @@ def render_financial_trends(ticker: str, market: str) -> None:
         ]
     }
     
+    def safe_get(lst, idx):
+        """Safely retrieve list element by index, returning None if out of range."""
+        try:
+            return lst[idx] if lst and idx < len(lst) else None
+        except (IndexError, TypeError):
+            return None
+
     for i, year in enumerate(years):
         raw_table_data[year] = [
-            format_val(data["revenue"][i]),
-            format_val(data["ebitda"][i]),
-            format_val(data["pat"][i]),
-            format_val(data["operating_cf"][i]),
-            format_val(data["investing_cf"][i]),
-            format_val(data["financing_cf"][i])
+            format_val(safe_get(data["revenue"], i)),
+            format_val(safe_get(data["ebitda"], i)),
+            format_val(safe_get(data["pat"], i)),
+            format_val(safe_get(data["operating_cf"], i)),
+            format_val(safe_get(data["investing_cf"], i)),
+            format_val(safe_get(data["financing_cf"], i)),
         ]
         
     df_table = pd.DataFrame(raw_table_data)
     st.dataframe(df_table, use_container_width=True, hide_index=True)
     
     # ── Charts ────────────────────────────────────────────────────────────────
+    # Trim all data lists to the length of years to prevent IndexError
+    n = len(years)
+    def trim(lst):
+        return (lst or [])[:n] + [None] * max(0, n - len(lst or []))
+
+    revenue_vals     = trim(data["revenue"])
+    ebitda_vals      = trim(data["ebitda"])
+    pat_vals         = trim(data["pat"])
+    op_cf_vals       = trim(data["operating_cf"])
+    inv_cf_vals      = trim(data["investing_cf"])
+    fin_cf_vals      = trim(data["financing_cf"])
+
     st.markdown("#### 📈 Profitability Trends")
     fig_profit = go.Figure()
-    
-    if any(x is not None for x in data["revenue"]):
+
+    if any(x is not None for x in revenue_vals):
         fig_profit.add_trace(go.Scatter(
-            x=years, y=data["revenue"], name="Total Revenue",
+            x=years, y=revenue_vals, name="Total Revenue",
             mode="lines+markers", line=dict(width=3, color="#1f77b4")
         ))
-    if any(x is not None for x in data["ebitda"]):
+    if any(x is not None for x in ebitda_vals):
         fig_profit.add_trace(go.Scatter(
-            x=years, y=data["ebitda"], name="EBITDA",
+            x=years, y=ebitda_vals, name="EBITDA",
             mode="lines+markers", line=dict(width=3, color="#ff7f0e")
         ))
-    if any(x is not None for x in data["pat"]):
+    if any(x is not None for x in pat_vals):
         fig_profit.add_trace(go.Scatter(
-            x=years, y=data["pat"], name="PAT (Net Income)",
+            x=years, y=pat_vals, name="PAT (Net Income)",
             mode="lines+markers", line=dict(width=3, color="#2ca02c")
         ))
         
@@ -751,19 +784,19 @@ def render_financial_trends(ticker: str, market: str) -> None:
 
     st.markdown("#### 💸 Cash Flow Trends")
     fig_cf = go.Figure()
-    if any(x is not None for x in data["operating_cf"]):
+    if any(x is not None for x in op_cf_vals):
         fig_cf.add_trace(go.Scatter(
-            x=years, y=data["operating_cf"], name="Operating CF",
+            x=years, y=op_cf_vals, name="Operating CF",
             mode="lines+markers", line=dict(width=3, color="#2ca02c")
         ))
-    if any(x is not None for x in data["investing_cf"]):
+    if any(x is not None for x in inv_cf_vals):
         fig_cf.add_trace(go.Scatter(
-            x=years, y=data["investing_cf"], name="Investing CF",
+            x=years, y=inv_cf_vals, name="Investing CF",
             mode="lines+markers", line=dict(width=3, color="#d62728")
         ))
-    if any(x is not None for x in data["financing_cf"]):
+    if any(x is not None for x in fin_cf_vals):
         fig_cf.add_trace(go.Scatter(
-            x=years, y=data["financing_cf"], name="Financing CF",
+            x=years, y=fin_cf_vals, name="Financing CF",
             mode="lines+markers", line=dict(width=3, color="#9467bd")
         ))
         
@@ -778,6 +811,312 @@ def render_financial_trends(ticker: str, market: str) -> None:
 
     if st.button("🔄 Refresh Financials", key="ref_fin"):
         cached_financial_trends.clear()
+        st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Peer Comparison Tab
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def cached_tv_sector_industry(symbol: str, market_code: str):
+    return screener_service.resolve_tv_sector_industry(symbol, market_code)
+
+@st.cache_data(show_spinner=False, ttl=300)
+def cached_peers(sector: str, industry: str, market_code: str):
+    return screener_service.get_peers(sector, industry, market_code)
+
+@st.cache_data(show_spinner=False, ttl=300)
+def cached_single_stock_screener_data(symbol: str, market_code: str):
+    return screener_service.get_single_stock_screener_data(symbol, market_code)
+
+def render_peer_comparison(ticker: str, market: str) -> None:
+    st.markdown("### 👥 Peer Comparison (PeerComp)")
+    st.markdown("Compare the selected portfolio stock with its industry peers.")
+
+    # Determine market code for TV (india or america)
+    market_code = "india" if market.lower() == "india" else "america"
+    
+    # 1. Resolve TV Sector/Industry
+    with st.spinner("Resolving industry sector..."):
+        resolved = cached_tv_sector_industry(ticker, market_code)
+        
+    if not resolved:
+        st.warning("⚠️ Could not resolve sector/industry information for this stock on TradingView. Comparison is unavailable.")
+        return
+        
+    sector, industry = resolved
+    st.info(f"📁 **Sector**: {sector} | 🏢 **Sub-Industry (GICS)**: {industry}")
+    
+    # 2. Multiselect for customizable metrics
+    all_metrics = [
+        "Price",
+        "% from 52w High",
+        "Market Cap",
+        "P/E",
+        "CMP/Bv (P/B)",
+        "EV/EBITDA",
+        "ROCE %",
+        "ROE %",
+        "Revenue",
+        "ROA %",
+        "CMP/Sales"
+    ]
+    
+    default_metrics = [
+        "Price",
+        "% from 52w High",
+        "Market Cap",
+        "P/E",
+        "ROCE %",
+        "ROE %"
+    ]
+    
+    selected_metrics = st.multiselect(
+        "Select Comparison Metrics",
+        all_metrics,
+        default=default_metrics,
+        key="peer_selected_metrics"
+    )
+    
+    if not selected_metrics:
+        st.info("Please select at least one metric to compare.")
+        return
+        
+    # Fetch peers data and target stock screener data
+    with st.spinner("Fetching peer metrics from TradingView..."):
+        peers_df = cached_peers(sector, industry, market_code)
+        target_df = cached_single_stock_screener_data(ticker, market_code)
+        
+    if target_df.empty:
+        st.warning("⚠️ Could not retrieve TradingView data for the target stock.")
+        return
+        
+    # Extract target row
+    target_row = target_df.iloc[0]
+    target_ticker_name = target_row["Ticker"]
+    
+    # Remove target stock from peer list if present to avoid duplicate display
+    if not peers_df.empty:
+        peers_df = peers_df[peers_df["Ticker"] != target_ticker_name]
+        
+    # 3. Dynamic Column Ratios Setup
+    # Let's allocate column widths. Ticker needs ~1.5, Action needs ~1.2.
+    # Rest of the width is divided among the selected metrics.
+    col_widths = [1.5]  # Ticker
+    for m in selected_metrics:
+        if m in ["Market Cap", "Revenue", "% from 52w High"]:
+            col_widths.append(1.5)  # slightly wider for formatted amounts
+        else:
+            col_widths.append(1.0)
+    col_widths.append(1.2)  # Action
+    
+    # Render table header
+    st.markdown("---")
+    header_cols = st.columns(col_widths)
+    with header_cols[0]:
+        st.markdown("**Ticker**")
+    for i, m in enumerate(selected_metrics):
+        with header_cols[i + 1]:
+            st.markdown(f"**{m}**")
+    with header_cols[-1]:
+        st.markdown("**Action**")
+        
+    # Formatting helper for cell values
+    def format_cell(val, metric_name, row_data, is_missing=False):
+        if is_missing or val is None or (isinstance(val, float) and pd.isna(val)):
+            return "—"
+        try:
+            market_label = "India" if market_code == "india" else "US"
+            currency = "₹" if market_label == "India" else "$"
+
+            if metric_name == "Price":
+                return f"{currency}{val:,.2f}"
+            elif metric_name == "% from 52w High":
+                price_val = row_data.get("Price")
+                if price_val and val > 0:
+                    pct = ((price_val - val) / val * 100)
+                    color = "red" if pct < 0 else "green"
+                    return f":{color}[{pct:+.1f}%]"
+                return "—"
+            elif metric_name == "Market Cap":
+                return stock_service.format_market_cap(val, market_label)
+            elif metric_name == "Revenue":
+                return stock_service.format_market_cap(val, market_label)
+            elif metric_name in ["ROCE %", "ROE %", "ROA %"]:
+                return f"{val:.1f}%"
+            elif metric_name in ["P/E", "CMP/Bv (P/B)", "EV/EBITDA", "CMP/Sales"]:
+                return f"{val:.2f}x"
+            else:
+                return str(val)
+        except Exception:
+            return "—"
+
+    # 4. Render Fixed Target Company Row (highlighted)
+    st.markdown(
+        """
+        <style>
+        .target-stock-highlight {
+            background-color: rgba(30, 33, 48, 0.9);
+            border: 2px solid #3e8ed0;
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 12px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    # ── Hybrid blend: TradingView → yfinance fallback for the target stock row ──
+    # We already have yfinance fundamentals loaded on the Overview tab — reuse it.
+    yf_fund = cached_fundamentals(ticker)  # fast: already cached from Overview tab
+
+    # Mapping: PeerComp column name -> yfinance fundamentals key
+    YF_FALLBACK = {
+        "Price":         "current_price",
+        "52w High":      "week_52_high",
+        "Market Cap":    "market_cap_raw",
+        "P/E":           "pe_ratio",
+        "P/B":           "price_to_book",
+        "EV/EBITDA":     "ev_to_ebitda",
+        "ROE %":         "roe",
+        "Revenue":       "revenue",
+        "ROA %":         "roa",
+        "CMP/Sales":     "price_to_sales",
+    }
+
+    def get_target_val(col_key):
+        """Get value for target row: TradingView first, yfinance fallback."""
+        tv_val = target_row.get(col_key)
+        if tv_val is not None and not (isinstance(tv_val, float) and pd.isna(tv_val)):
+            return tv_val
+        # Fallback to yfinance
+        yf_key = YF_FALLBACK.get(col_key)
+        if yf_key and not yf_fund.get("error"):
+            return yf_fund.get(yf_key)
+        return None
+
+    with st.container():
+        st.markdown('<div class="target-stock-highlight">', unsafe_allow_html=True)
+        t_cols = st.columns(col_widths)
+
+        # Convert symbol to yfinance format
+        tv_ticker = target_row["Symbol"]
+        target_name = target_row["Company Name"]
+
+        yf_ticker_local = tv_ticker
+        if ":" in tv_ticker:
+            exch, tk = tv_ticker.split(":", 1)
+            if exch in ["NSE", "BSE"]:
+                yf_ticker_local = f"{tk}.NS" if exch == "NSE" else f"{tk}.BO"
+            else:
+                yf_ticker_local = tk
+
+        with t_cols[0]:
+            st.markdown(f"**🎯 `{yf_ticker_local}`**")
+            st.caption("Selected")
+
+        # Build a blended row dict so % from 52w High can access Price
+        blended_row = dict(target_row)
+        for col_key in ["Price", "52w High", "Market Cap", "P/E", "P/B",
+                        "EV/EBITDA", "ROE %", "Revenue", "ROA %", "CMP/Sales"]:
+            blended_row[col_key] = get_target_val(col_key)
+
+        for i, m in enumerate(selected_metrics):
+            with t_cols[i + 1]:
+                col_key = m
+                if m == "% from 52w High":
+                    col_key = "52w High"
+                elif m == "CMP/Bv (P/B)":
+                    col_key = "P/B"
+                cell_val = blended_row.get(col_key)
+                st.markdown(f"**{format_cell(cell_val, m, blended_row)}**")
+
+        with t_cols[-1]:
+            st.markdown("🔒 Selected")
+
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+    # 5. Render Scrollable Peer Companies Container
+    if peers_df.empty:
+        st.info("No other peer companies found in this category.")
+        return
+
+    # Pre-build yfinance ticker list from TradingView symbols
+    def tv_to_yf(tv_sym: str) -> str:
+        if ":" in tv_sym:
+            exch, tk = tv_sym.split(":", 1)
+            if exch in ["NSE", "BSE"]:
+                return f"{tk}.NS" if exch == "NSE" else f"{tk}.BO"
+            return tk
+        return tv_sym
+
+    portfolio_ticker_set = {p["ticker"].upper() for p in get_portfolio()}
+
+    # Pre-fetch fundamentals for ALL peers using the SAME source as Overview tab.
+    # cached_fundamentals has a 5-min cache so repeat views are instant.
+    with st.spinner("Loading peer fundamentals..."):
+        peer_fund_map: dict = {}  # yf_ticker.upper() -> fundamentals dict
+        for _, peer_row in peers_df.iterrows():
+            p_yf = tv_to_yf(peer_row["Symbol"])
+            pf = cached_fundamentals(p_yf)
+            if not pf.get("error"):
+                peer_fund_map[p_yf.upper()] = pf
+
+    st.markdown("#### Peer Listings")
+    with st.container(height=350):
+        for idx, row in peers_df.iterrows():
+            p_cols = st.columns(col_widths)
+
+            p_yf_ticker = tv_to_yf(row["Symbol"])
+            p_name = row["Company Name"]
+
+            # Fetch pre-loaded fundamentals (same data as Overview & Fundamentals tab)
+            pf_data = peer_fund_map.get(p_yf_ticker.upper())
+
+            # Build blended row: TradingView first, yfinance fallback for NaN/None
+            blended_peer = dict(row)
+            if pf_data:
+                for ck, yf_key in YF_FALLBACK.items():
+                    tv_val = blended_peer.get(ck)
+                    tv_missing = (tv_val is None or
+                                  (isinstance(tv_val, float) and pd.isna(tv_val)))
+                    if tv_missing:
+                        yf_val = pf_data.get(yf_key)
+                        if yf_val is not None:
+                            blended_peer[ck] = yf_val
+
+            with p_cols[0]:
+                if p_yf_ticker.upper() in portfolio_ticker_set:
+                    st.markdown(f"**`{p_yf_ticker}`** 📌")
+                else:
+                    st.markdown(f"`{p_yf_ticker}`")
+                st.caption(p_name[:22] + "..." if len(p_name) > 22 else p_name)
+
+            for i, m in enumerate(selected_metrics):
+                with p_cols[i + 1]:
+                    col_key = m
+                    if m == "% from 52w High":
+                        col_key = "52w High"
+                    elif m == "CMP/Bv (P/B)":
+                        col_key = "P/B"
+                    cell_val = blended_peer.get(col_key)
+                    st.markdown(format_cell(cell_val, m, blended_peer))
+                    
+            with p_cols[-1]:
+                if ticker_exists(p_yf_ticker):
+                    st.markdown("✔️ Added")
+                else:
+                    if st.button("＋ Port", key=f"peer_add_{p_yf_ticker}_{idx}"):
+                        market_label = "India" if market_code == "india" else "US"
+                        if _add_stock_from_result(p_yf_ticker, p_name, market_label):
+                            st.rerun()
+
+    if st.button("🔄 Refresh Comparison Data", key="ref_peer"):
+        cached_tv_sector_industry.clear()
+        cached_peers.clear()
+        cached_single_stock_screener_data.clear()
         st.rerun()
 
 
@@ -1153,6 +1492,12 @@ def render_welcome() -> None:
         formatted_mc = stock_service.format_market_cap(mc, market_label)
         formatted_price = f"₹{price:,.2f}" if market_label == "India" else f"${price:,.2f}"
         
+        # Calculate % difference from 52w High
+        hi52 = row.get("52w High")
+        pct_from_hi = None
+        if price and hi52 and hi52 > 0:
+            pct_from_hi = ((price - hi52) / hi52 * 100)
+            
         with r_col1:
             st.write(f"`{yf_ticker}`")
         with r_col2:
@@ -1160,7 +1505,17 @@ def render_welcome() -> None:
         with r_col3:
             st.write(formatted_mc)
         with r_col4:
-            st.write(formatted_price)
+            if pct_from_hi is not None:
+                color_hex = "#ff4b4b" if pct_from_hi < 0 else "#09ab3b"
+                st.markdown(
+                    f"<div style='line-height: 1.1; margin: 0; padding: 0;'>"
+                    f"<div style='font-size: 1rem;'>{formatted_price}</div>"
+                    f"<div style='font-size: 0.78rem; color: {color_hex}; font-weight: 600; margin-top: 2px;'>{pct_from_hi:+.1f}% from 52w H</div>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+            else:
+                st.write(formatted_price)
         with r_col5:
             # Check if ticker is already in portfolio
             if ticker_exists(yf_ticker):
@@ -1192,12 +1547,13 @@ def main() -> None:
     market    = st.session_state.selected_market
     name      = st.session_state.selected_name or ticker
 
-    # Four tabs
-    tab_ov, tab_ta, tab_news, tab_fin = st.tabs([
+    # Five tabs
+    tab_ov, tab_ta, tab_news, tab_fin, tab_peer = st.tabs([
         "📋 Overview & Fundamentals",
         "📈 Technical Analysis",
         "📰 News Feed",
         "📊 Financials & Trends",
+        "👥 Peer Comparison",
     ])
 
     with tab_ov:
@@ -1229,6 +1585,9 @@ def main() -> None:
 
     with tab_fin:
         render_financial_trends(ticker, market)
+
+    with tab_peer:
+        render_peer_comparison(ticker, market)
 
 
 if __name__ == "__main__":

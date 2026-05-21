@@ -10,7 +10,6 @@ Market detection logic:
 """
 
 import logging
-from functools import lru_cache
 from typing import Dict, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
@@ -144,10 +143,10 @@ def _fetch_last_price(stock, info: Dict[str, Any], fast_info: Dict[str, Any]) ->
     return None
 
 
-@lru_cache(maxsize=128)
 def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
     """
     Fetch stock fundamentals using yfinance.
+    Always fetches fresh data — caching is handled by Streamlit's @st.cache_data.
 
     Args:
         ticker: Raw ticker symbol (market auto-detected)
@@ -177,10 +176,42 @@ def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
             return {"error": f"Ticker '{ticker}' not found. Please check the symbol."}
 
         name = safe_get(info, "longName") or safe_get(info, "shortName") or yf_ticker
-
-        # Currency symbol
         currency = "₹" if market == "India" else "$"
-        current_price = _fetch_last_price(stock, info, fast_info)
+
+        # ── Live price-sensitive fields: always prefer fast_info (bypasses cache) ──
+        current_price = (
+            fast_info.get("last_price")
+            or safe_get(info, "currentPrice")
+            or safe_get(info, "regularMarketPrice")
+            or safe_get(info, "previousClose")
+        )
+        week_52_high = (
+            fast_info.get("year_high")
+            or safe_get(info, "fiftyTwoWeekHigh")
+        )
+        week_52_low = (
+            fast_info.get("year_low")
+            or safe_get(info, "fiftyTwoWeekLow")
+        )
+        market_cap_raw = (
+            fast_info.get("market_cap")
+            or safe_get(info, "marketCap")
+        )
+
+        # ── Computed ratios from info (TTM / FQ data) ───────────────────────────
+        # Price-to-Sales: prefer info, fallback calculate from revenue & mktcap
+        price_to_sales = safe_get(info, "priceToSalesTrailing12Months")
+        # EV/EBITDA: yfinance exposes enterpriseToEbitda
+        ev_to_ebitda = safe_get(info, "enterpriseToEbitda")
+        # ROA: returnOnAssets is a ratio (e.g. 0.12 = 12%), multiply by 100
+        roa_raw = safe_get(info, "returnOnAssets")
+        roa = (roa_raw * 100) if roa_raw is not None else None
+        # ROE: same treatment
+        roe_raw = safe_get(info, "returnOnEquity")
+        roe = (roe_raw * 100) if roe_raw is not None else None
+        # Profit margin
+        profit_margin_raw = safe_get(info, "profitMargins")
+        profit_margin = (profit_margin_raw * 100) if profit_margin_raw is not None else None
 
         fundamentals = {
             "ticker":           yf_ticker,
@@ -193,20 +224,23 @@ def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
             "current_price":    current_price,
             "pe_ratio":         safe_get(info, "trailingPE"),
             "forward_pe":       safe_get(info, "forwardPE"),
-            "market_cap":       format_market_cap(safe_get(info, "marketCap") or fast_info.get("market_cap"), market),
-            "market_cap_raw":   safe_get(info, "marketCap") or fast_info.get("market_cap"),
-            "week_52_high":     safe_get(info, "fiftyTwoWeekHigh"),
-            "week_52_low":      safe_get(info, "fiftyTwoWeekLow"),
+            "market_cap":       format_market_cap(market_cap_raw, market),
+            "market_cap_raw":   market_cap_raw,
+            "week_52_high":     week_52_high,
+            "week_52_low":      week_52_low,
             "dividend_yield":   safe_get(info, "dividendYield"),
             "beta":             safe_get(info, "beta"),
-            "profit_margin":    safe_get(info, "profitMargins"),
-            "roe":              safe_get(info, "returnOnEquity"),
+            "profit_margin":    profit_margin,
+            "roe":              roe,
             "revenue":          safe_get(info, "totalRevenue"),
             "debt_to_equity":   safe_get(info, "debtToEquity"),
             "current_ratio":    safe_get(info, "currentRatio"),
             "eps":              safe_get(info, "trailingEps"),
             "book_value":       safe_get(info, "bookValue"),
             "price_to_book":    safe_get(info, "priceToBook"),
+            "ev_to_ebitda":     ev_to_ebitda,
+            "roa":              roa,
+            "price_to_sales":   price_to_sales,
             "avg_volume":       safe_get(info, "averageVolume"),
             "description":      safe_get(info, "longBusinessSummary", ""),
             "website":          safe_get(info, "website", ""),
@@ -214,6 +248,54 @@ def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
             "exchange":         safe_get(info, "exchange", "") or fast_info.get("exchange", ""),
             "error":            None,
         }
+
+        # ── OVERWRITE WITH TRADINGVIEW DATA IF AVAILABLE (OPTION 1) ──
+        # TradingView screener provides more up-to-date and accurate data (especially for Indian stocks)
+        try:
+            from services.screener_service import get_single_stock_screener_data
+            tv_market = 'india' if market == 'India' else 'america'
+            tv_df = get_single_stock_screener_data(yf_ticker, tv_market)
+            
+            if tv_df is not None and not tv_df.empty:
+                # Prefer NSE over BSE if multiple rows returned
+                if len(tv_df) > 1 and "exchange" in tv_df.columns:
+                    nse_rows = tv_df[tv_df["exchange"] == "NSE"]
+                    tv_row = nse_rows.iloc[0].to_dict() if not nse_rows.empty else tv_df.iloc[0].to_dict()
+                else:
+                    tv_row = tv_df.iloc[0].to_dict()
+                
+                def tv_override(key: str, tv_col: str, multiplier: float = 1.0):
+                    val = tv_row.get(tv_col)
+                    if val is not None and not pd.isna(val):
+                        fundamentals[key] = val * multiplier
+                
+                # Live Price & Basics
+                tv_override("current_price", "close")
+                tv_override("week_52_high", "price_52_week_high")
+                
+                # Market Cap requires formatting update
+                val_mc = tv_row.get("market_cap_basic")
+                if val_mc is not None and not pd.isna(val_mc):
+                    fundamentals["market_cap_raw"] = val_mc
+                    fundamentals["market_cap"] = format_market_cap(val_mc, market)
+                    
+                # Ratios (TradingView returns percentages directly for ROE/ROA, no *100 needed)
+                tv_override("pe_ratio", "price_earnings_ttm")
+                tv_override("price_to_book", "price_book_fq")
+                tv_override("ev_to_ebitda", "enterprise_value_ebitda_ttm")
+                tv_override("roe", "return_on_equity_fq")
+                tv_override("roa", "return_on_assets_fq")
+                tv_override("price_to_sales", "price_sales_ratio")
+                tv_override("revenue", "total_revenue_ttm")
+                
+                # EPS - Only override if TTM is available. FQ is quarterly, not annual.
+                eps_basic = tv_row.get("earnings_per_share_basic_ttm")
+                if eps_basic is not None and not pd.isna(eps_basic):
+                    fundamentals["eps"] = eps_basic
+
+        except Exception as tv_e:
+            logger.warning(f"Failed to fetch TradingView overrides for {ticker}: {tv_e}")
+
         return fundamentals
 
     except Exception as e:
