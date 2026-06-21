@@ -23,6 +23,7 @@ Fixes applied:
 """
 
 import logging
+import os
 import requests
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
@@ -81,7 +82,8 @@ def _get_secret(key: str) -> Optional[str]:
             return str(val)
     except Exception:
         pass
-    return None
+
+    return os.environ.get(key)
 
 
 def _determine_market_and_currency(exchange: str, symbol: str) -> Tuple[str, str]:
@@ -163,12 +165,22 @@ def _normalize_indian_symbol(symbol: str, prefer_nse: bool = True) -> str:
 # PRIMARY: Financial Modeling Prep (FMP) Name Search API
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _parse_fmp_error(response):
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            return data.get("Error Message") or data.get("error") or data.get("message")
+    except Exception:
+        pass
+    return None
+
+
 def search_fmp(query: str, limit: int = 5) -> List[SearchResult]:
     """
     Search for stocks by company name using Financial Modeling Prep API.
 
-    Docs: https://site.financialmodelingprep.com/developer/docs/stable/search-name
-    Free tier: 250-300 requests/day
+    The legacy v3 search-name endpoint is no longer supported for many users.
+    We now prefer the current v4 search endpoints and fall back if needed.
 
     Args:
         query: Company name or partial name (e.g., "Reliance", "Google")
@@ -182,63 +194,93 @@ def search_fmp(query: str, limit: int = 5) -> List[SearchResult]:
         logger.warning("FMP_API_KEY not set. Skipping FMP search.")
         return []
 
-    url = "https://financialmodelingprep.com/api/v3/search-name"
+    endpoints = [
+        "https://financialmodelingprep.com/api/v4/search",
+        "https://financialmodelingprep.com/api/v4/search-name",
+        "https://financialmodelingprep.com/api/v3/search-name",
+    ]
+
     params = {
         "query": query,
         "limit": limit,
         "apikey": api_key,
     }
 
-    try:
-        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    response = None
+    for url in endpoints:
+        try:
+            response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            error_message = _parse_fmp_error(response)
 
-        if response.status_code == 429:
-            logger.warning("FMP API rate limit hit. Consider upgrading or try later.")
-            return []
-        if response.status_code == 401:
-            logger.error("FMP API key is invalid or expired.")
-            return []
-        if response.status_code == 404:
-            logger.warning(f"FMP search endpoint returned 404 for query: {query}")
-            return []
+            if response.status_code == 429:
+                logger.warning("FMP API rate limit hit. Consider upgrading or try later.")
+                return []
 
-        response.raise_for_status()
-        data = response.json()
+            if response.status_code == 401:
+                logger.error("FMP API key is invalid or expired.")
+                return []
 
-        if not isinstance(data, list):
-            logger.warning(f"Unexpected FMP response format: {type(data)}")
-            return []
+            if response.status_code == 403:
+                if error_message and "legacy endpoint" in error_message.lower():
+                    logger.warning(
+                        f"FMP legacy endpoint at {url} is no longer supported; trying next endpoint."
+                    )
+                    continue
+                logger.error(
+                    f"FMP API access forbidden for query '{query}' on {url}. "
+                    "Please verify your key permissions and plan."
+                )
+                logger.debug(f"FMP 403 response body: {response.text}")
+                return []
 
-        results = []
-        for item in data[:limit]:
-            symbol = item.get("symbol", "")
-            name = item.get("name", "")
-            exchange = item.get("exchangeShortName", "") or item.get("exchange", "")
-
-            if not symbol or not name:
+            if response.status_code == 404:
+                logger.warning(f"FMP search endpoint returned 404 for query: {query} on {url}")
                 continue
 
-            market, currency = _determine_market_and_currency(exchange, symbol)
+            response.raise_for_status()
+            data = response.json()
 
-            results.append(SearchResult(
-                symbol=symbol,
-                company_name=name,
-                exchange=exchange,
-                market=market,
-                currency=currency,
-                score=item.get("stockScore", None),
-                source="FMP",
-            ))
+            if not isinstance(data, list):
+                logger.warning(f"Unexpected FMP response format from {url}: {type(data)}")
+                continue
 
-        logger.info(f"FMP search for '{query}' returned {len(results)} results.")
-        return results
+            results = []
+            for item in data[:limit]:
+                symbol = item.get("symbol", "")
+                name = item.get("name", "")
+                exchange = item.get("exchangeShortName", "") or item.get("exchange", "")
 
-    except requests.RequestException as e:
-        logger.error(f"FMP search request failed: {e}")
-        return []
-    except Exception as e:
-        logger.error(f"Unexpected error in FMP search: {e}")
-        return []
+                if not symbol or not name:
+                    continue
+
+                market, currency = _determine_market_and_currency(exchange, symbol)
+
+                results.append(SearchResult(
+                    symbol=symbol,
+                    company_name=name,
+                    exchange=exchange,
+                    market=market,
+                    currency=currency,
+                    score=item.get("stockScore", None),
+                    source="FMP",
+                ))
+
+            logger.info(f"FMP search for '{query}' returned {len(results)} results from {url}.")
+            return results
+
+        except requests.RequestException as e:
+            logger.error(f"FMP search request failed for {url}: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error in FMP search for {url}: {e}")
+            return []
+
+    if response is not None:
+        logger.error(
+            f"All FMP search endpoints failed for query '{query}'. "
+            f"Last status: {response.status_code}, message: {_parse_fmp_error(response)}"
+        )
+    return []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
