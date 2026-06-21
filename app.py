@@ -324,6 +324,27 @@ def _is_within_max_age(pub_epoch: Optional[int]) -> bool:
 # Stock add logic  (shared between sidebar search and quick-add buttons)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _is_rate_limit_error(data: dict | None) -> bool:
+    return (
+        isinstance(data, dict)
+        and data.get("error")
+        and "rate limit" in str(data.get("error")).lower()
+    )
+
+
+def _lookup_cached_fundamentals(ticker: str, container=None) -> dict:
+    out = container or st.sidebar
+    with out:
+        with st.spinner(f"Looking up {ticker}…"):
+            data = cached_fundamentals(ticker)
+
+    if _is_rate_limit_error(data):
+        out.error(
+            "❌ Yahoo Finance rate limit reached. Please wait a few minutes and try again."
+        )
+    return data
+
+
 def _add_stock_from_result(symbol: str, company_name: str, market: str,
                            container=None, fundamentals: dict | None = None) -> bool:
     """
@@ -344,8 +365,11 @@ def _add_stock_from_result(symbol: str, company_name: str, market: str,
         test_ns_symbol = symbol.replace(".BO", ".NS")
         with out:
             with st.spinner(f"Checking NSE listing for {company_name}…"):
-                ns_data = fetch_fundamentals(test_ns_symbol)
-        
+                ns_data = _lookup_cached_fundamentals(test_ns_symbol, out)
+
+        if _is_rate_limit_error(ns_data):
+            return False
+
         # If the .NS listing is valid (no error), quietly swap to it!
         if not ns_data.get("error"):
             symbol = test_ns_symbol
@@ -357,7 +381,10 @@ def _add_stock_from_result(symbol: str, company_name: str, market: str,
 
     with out:
         with st.spinner(f"Validating {symbol}…"):
-            data = fundamentals if fundamentals is not None else fetch_fundamentals(symbol)
+            data = fundamentals if fundamentals is not None else _lookup_cached_fundamentals(symbol, out)
+
+    if _is_rate_limit_error(data):
+        return False
 
     if data.get("error"):
         error_message = data.get("error")
@@ -406,9 +433,9 @@ def _add_stock_by_raw_input(raw: str, container=None) -> bool:
         for bad, good in [(".BO.NS", ".NS"), (".NS.BO", ".BO")]:
             yf_ticker = yf_ticker.replace(bad, good)
 
-        with out:
-            with st.spinner(f"Looking up {yf_ticker}…"):
-                data = fetch_fundamentals(upper)
+        data = _lookup_cached_fundamentals(upper, out)
+        if _is_rate_limit_error(data):
+            return False
 
         if not data.get("error"):
             return _add_stock_from_result(

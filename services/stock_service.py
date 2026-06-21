@@ -108,6 +108,11 @@ def _load_yfinance_info(stock) -> Dict[str, Any]:
     return info or {}
 
 
+def _is_yfinance_rate_limit(exception: Exception) -> bool:
+    message = str(exception).lower()
+    return "too many requests" in message or "429" in message
+
+
 def _load_yfinance_fast_info(stock) -> Dict[str, Any]:
     """Safely read yfinance fast_info metadata."""
     fast_info = {}
@@ -299,6 +304,10 @@ def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
         return fundamentals
 
     except Exception as e:
+        if _is_yfinance_rate_limit(e):
+            logger.warning(f"yfinance rate limit hit for {ticker}: {e}")
+            return {"error": "Yahoo Finance rate limit reached. Please wait a few minutes and try again.", "ticker": ticker}
+
         logger.error(f"Error fetching fundamentals for {ticker}: {e}")
         return {"error": str(e), "ticker": ticker}
 
